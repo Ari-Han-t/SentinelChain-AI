@@ -36,6 +36,19 @@ def test_protected_route_requires_authentication(client):
     assert response.status_code == 401
 
 
+def test_local_vite_origin_passes_cors_preflight(client):
+    response = client.options(
+        "/auth/login",
+        headers={
+            "Origin": "http://127.0.0.1:5173",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type",
+        },
+    )
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "http://127.0.0.1:5173"
+
+
 def test_role_cannot_cross_approval_boundary(client, auth):
     response = client.post(
         "/recommendations/1/decision",
@@ -43,4 +56,3 @@ def test_role_cannot_cross_approval_boundary(client, auth):
         json={"decision": "approved", "expected_status": "pending"},
     )
     assert response.status_code == 403
-

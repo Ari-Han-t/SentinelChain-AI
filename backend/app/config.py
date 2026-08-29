@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     jwt_ttl_minutes: int = 30
     import_hmac_secret: str = "development-import-secret"
     field_encryption_key: str = "development-field-key"
-    cors_origins: str = "http://localhost:5173"
+    cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
     demo_mode: bool = True
     seed_demo_data: bool = True
     rate_limit_per_minute: int = 180

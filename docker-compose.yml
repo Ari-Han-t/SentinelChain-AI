@@ -21,7 +21,7 @@ services:
       JWT_SECRET: local-docker-jwt-secret-change-in-production
       IMPORT_HMAC_SECRET: local-docker-import-key
       FIELD_ENCRYPTION_KEY: local-docker-encryption-key
-      CORS_ORIGINS: http://localhost:5173,http://localhost:3000
+      CORS_ORIGINS: http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000
       DEMO_MODE: "true"
       SEED_DEMO_DATA: "true"
     ports:
@@ -42,4 +42,3 @@ services:
 
 volumes:
   postgres_data:
-
