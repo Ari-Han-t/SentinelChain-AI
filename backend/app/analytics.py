@@ -106,7 +106,7 @@ def train_forecast(sales: pd.DataFrame) -> dict:
     y_train, y_test = frame.loc[: split - 1, "quantity"], frame.loc[split:, "quantity"]
 
     try:
-        from xgboost import XGBRegressor
+        from xgboost import DMatrix, XGBRegressor
 
         model = XGBRegressor(
             n_estimators=120,
@@ -127,7 +127,11 @@ def train_forecast(sales: pd.DataFrame) -> dict:
     nonzero = y_test.to_numpy() != 0
     mape = float(np.mean(np.abs((y_test.to_numpy()[nonzero] - predictions[nonzero]) / y_test.to_numpy()[nonzero])) * 100) if nonzero.any() else 0.0
 
-    if hasattr(model, "feature_importances_"):
+    if model_name == "XGBoost":
+        # XGBoost exposes exact TreeSHAP contributions without a second model.
+        contributions = model.get_booster().predict(DMatrix(x_test), pred_contribs=True)[:, :-1]
+        importance = dict(zip(FEATURES, [float(value) for value in np.abs(contributions).mean(axis=0)], strict=True))
+    elif hasattr(model, "feature_importances_"):
         importance = dict(zip(FEATURES, [float(value) for value in model.feature_importances_], strict=True))
     else:
         importance = {name: 0.0 for name in FEATURES}

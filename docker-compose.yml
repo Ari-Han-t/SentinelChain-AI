@@ -1,0 +1,45 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: sentinelchain
+      POSTGRES_USER: sentinel
+      POSTGRES_PASSWORD: sentinel-local-only
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sentinel -d sentinelchain"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  api:
+    build: ./backend
+    environment:
+      ENVIRONMENT: development
+      DATABASE_URL: postgresql+psycopg://sentinel:sentinel-local-only@db:5432/sentinelchain
+      JWT_SECRET: local-docker-jwt-secret-change-in-production
+      IMPORT_HMAC_SECRET: local-docker-import-key
+      FIELD_ENCRYPTION_KEY: local-docker-encryption-key
+      CORS_ORIGINS: http://localhost:5173,http://localhost:3000
+      DEMO_MODE: "true"
+      SEED_DEMO_DATA: "true"
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  web:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_URL: http://localhost:8000
+    ports:
+      - "5173:80"
+    depends_on:
+      - api
+
+volumes:
+  postgres_data:
+

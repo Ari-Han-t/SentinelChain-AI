@@ -64,7 +64,7 @@ class ImportBatch(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     dataset_name: Mapped[str] = mapped_column(String(180))
-    digest: Mapped[str] = mapped_column(String(64))
+    digest: Mapped[str] = mapped_column(String(64), unique=True)
     status: Mapped[str] = mapped_column(String(30))
     row_count: Mapped[int] = mapped_column(Integer, default=0)
     quarantined_count: Mapped[int] = mapped_column(Integer, default=0)

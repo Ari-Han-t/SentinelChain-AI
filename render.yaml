@@ -1,0 +1,32 @@
+databases:
+  - name: sentinelchain-db
+    databaseName: sentinelchain
+    user: sentinelchain
+
+services:
+  - type: web
+    name: sentinelchain-api
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    healthCheckPath: /health
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: sentinelchain-db
+          property: connectionString
+      - key: JWT_SECRET
+        generateValue: true
+      - key: IMPORT_HMAC_SECRET
+        generateValue: true
+      - key: FIELD_ENCRYPTION_KEY
+        generateValue: true
+      - key: DEMO_MODE
+        value: "false"
+      - key: SEED_DEMO_DATA
+        value: "false"
+      - key: CORS_ORIGINS
+        value: https://sentinelchain-ai.vercel.app
+
