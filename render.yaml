@@ -27,6 +27,9 @@ services:
         value: "false"
       - key: SEED_DEMO_DATA
         value: "false"
+      - key: BOOTSTRAP_ADMIN_EMAIL
+        sync: false
+      - key: BOOTSTRAP_ADMIN_PASSWORD
+        sync: false
       - key: CORS_ORIGINS
         value: https://sentinelchain-ai.vercel.app
-

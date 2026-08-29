@@ -2,8 +2,9 @@ from sqlalchemy import select
 
 from app.audit import verify_chain
 from app.database import SessionLocal
-from app.models import AuditEvent
+from app.models import AuditEvent, User
 from app.security import decrypt_field, encrypt_field, sign_import, verify_import_signature
+from app.seed import bootstrap_admin
 
 
 def test_hmac_rejects_modified_content():
@@ -29,6 +30,14 @@ def test_audit_chain_detects_database_tampering():
         valid, broken_at = verify_chain(db)
         assert not valid
         assert broken_at == 1
+
+
+def test_production_admin_bootstrap_is_idempotent():
+    bootstrap_admin("owner@example.com", "a-secure-test-password")
+    bootstrap_admin("owner@example.com", "a-different-password")
+    with SessionLocal() as db:
+        users = db.scalars(select(User).where(User.email == "owner@example.com")).all()
+        assert len(users) == 1
 
 
 def test_protected_route_requires_authentication(client):

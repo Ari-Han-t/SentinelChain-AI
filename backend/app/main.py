@@ -33,7 +33,7 @@ from .models import (
 )
 from .schemas import AttackRequest, DecisionRequest, ImportRequest, LoginRequest, TokenResponse
 from .security import create_access_token, get_current_user, require_roles, sign_import, verify_import_signature, verify_password
-from .seed import seed_database
+from .seed import bootstrap_admin, seed_database
 
 
 @asynccontextmanager
@@ -41,6 +41,8 @@ async def lifespan(_: FastAPI):
     init_db()
     if settings.seed_demo_data:
         seed_database()
+    elif settings.bootstrap_admin_email and settings.bootstrap_admin_password:
+        bootstrap_admin(settings.bootstrap_admin_email, settings.bootstrap_admin_password)
     yield
 
 

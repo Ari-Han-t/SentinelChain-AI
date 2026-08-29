@@ -54,6 +54,18 @@ def seed_database() -> None:
         db.commit()
 
 
+def bootstrap_admin(email: str, password: str) -> None:
+    """Create the first production administrator exactly once."""
+    init_db()
+    with SessionLocal() as db:
+        if db.scalar(select(User).where(User.email == email.lower())):
+            return
+        admin = User(email=email.lower(), display_name="SentinelChain Admin", role=Role.ADMIN.value, password_hash=hash_password(password))
+        db.add(admin)
+        db.flush()
+        append_audit(db, "admin.bootstrapped", admin.id, {"email": admin.email})
+        db.commit()
+
+
 if __name__ == "__main__":
     seed_database()
-

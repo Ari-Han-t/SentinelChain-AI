@@ -127,7 +127,7 @@ The backend suite covers authentication, role boundaries, HMAC tamper detection,
 ## Deployment
 
 - `docker-compose.yml` runs the full local stack with PostgreSQL.
-- `render.yaml` defines the API and managed PostgreSQL service. Set `CORS_ORIGINS` to the deployed frontend and keep `DEMO_MODE=false` for any production-labelled environment.
+- `render.yaml` defines the API and managed PostgreSQL service. Set the secret `BOOTSTRAP_ADMIN_PASSWORD`, its matching email, and `CORS_ORIGINS` before first deploy; keep `DEMO_MODE=false` for any production-labelled environment. Bootstrap is idempotent and never replaces an existing password.
 - `frontend/vercel.json` supports Vercel SPA routing. Set `VITE_API_URL` during the Vercel build.
 - GitHub Actions runs backend tests, frontend tests/build, and a high-severity dependency audit.
 
@@ -149,4 +149,3 @@ frontend/src/      React control tower
 frontend/tests/    component and Playwright tests
 .github/workflows/ CI and dependency checks
 ```
-

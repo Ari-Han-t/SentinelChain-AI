@@ -16,6 +16,8 @@ class Settings(BaseSettings):
     demo_mode: bool = True
     seed_demo_data: bool = True
     rate_limit_per_minute: int = 180
+    bootstrap_admin_email: str | None = None
+    bootstrap_admin_password: str | None = None
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
@@ -31,6 +33,10 @@ class Settings(BaseSettings):
                 raise ValueError("Production secrets must each be at least 32 characters")
             if self.demo_mode:
                 raise ValueError("DEMO_MODE must be false in production")
+            if bool(self.bootstrap_admin_email) != bool(self.bootstrap_admin_password):
+                raise ValueError("Set both BOOTSTRAP_ADMIN_EMAIL and BOOTSTRAP_ADMIN_PASSWORD")
+            if self.bootstrap_admin_password and len(self.bootstrap_admin_password) < 12:
+                raise ValueError("BOOTSTRAP_ADMIN_PASSWORD must be at least 12 characters")
         return self
 
 
