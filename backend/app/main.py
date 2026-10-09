@@ -3,9 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 import time
+import asyncio
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import pandas as pd
 from fastapi import Depends, FastAPI, HTTPException, Request, status
@@ -17,23 +18,62 @@ from sqlalchemy.orm import Session
 from .analytics import DatasetError, analyze_sales, inventory_policy, parse_sales_csv, supplier_risk, train_forecast
 from .audit import append_audit, verify_chain
 from .config import settings
-from .database import get_db, init_db
+from .database import SessionLocal, get_db, init_db
+from .guidance import context_digest, guidance_for, utc_after
 from .models import (
+    ActionProposal,
     Alert,
     AuditEvent,
+    EvidenceRecord,
     Forecast,
+    GuidanceRun,
     ImportBatch,
+    OrganizationProfile,
     Product,
     QuarantinedRecord,
     Recommendation,
     Role,
     SaleRecord,
     Supplier,
+    SupplyChain,
+    SupplyChainEdge,
+    SupplyChainNode,
     User,
+    UserContext,
+    utcnow,
 )
-from .schemas import AttackRequest, DecisionRequest, ImportRequest, LoginRequest, TokenResponse
-from .security import create_access_token, get_current_user, require_roles, sign_import, verify_import_signature, verify_password
+from .schemas import (
+    ActionDecisionRequest,
+    AttackRequest,
+    DecisionRequest,
+    EdgeCreateRequest,
+    EdgeUpdateRequest,
+    EscalateActionRequest,
+    EvidenceRequest,
+    ImportRequest,
+    LoginRequest,
+    NodeCreateRequest,
+    NodeUpdateRequest,
+    OrganizationContextRequest,
+    SupplyChainCreateRequest,
+    SupplyChainUpdateRequest,
+    TokenResponse,
+    UserContextRequest,
+    VerifyNodeRequest,
+)
+from .security import create_access_token, get_current_user, permissions_for, require_roles, sign_import, verify_import_signature, verify_password
 from .seed import bootstrap_admin, seed_database
+
+
+async def _monitoring_loop() -> None:
+    while True:
+        await asyncio.sleep(max(settings.monitoring_interval_seconds, 60))
+        with SessionLocal() as db:
+            nodes = db.scalars(select(SupplyChainNode).where(SupplyChainNode.active.is_(True))).all()
+            for node in nodes:
+                latest = db.scalar(select(GuidanceRun).where(GuidanceRun.node_id == node.id).order_by(GuidanceRun.created_at.desc()).limit(1))
+                if latest is None or latest.next_check_at <= datetime.now(timezone.utc).replace(tzinfo=None):
+                    _run_node_guidance(db, node, None, force=True)
 
 
 @asynccontextmanager
@@ -43,7 +83,11 @@ async def lifespan(_: FastAPI):
         seed_database()
     elif settings.bootstrap_admin_email and settings.bootstrap_admin_password:
         bootstrap_admin(settings.bootstrap_admin_email, settings.bootstrap_admin_password)
-    yield
+    monitor = asyncio.create_task(_monitoring_loop())
+    try:
+        yield
+    finally:
+        monitor.cancel()
 
 
 app = FastAPI(
@@ -56,7 +100,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origin_list,
     allow_credentials=True,
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
     allow_headers=["Authorization", "Content-Type"],
 )
 
@@ -128,6 +172,683 @@ def login(body: LoginRequest, db: Session = Depends(get_db)) -> TokenResponse:
 @app.get("/auth/me")
 def me(user: User = Depends(get_current_user)) -> dict:
     return user_json(user)
+
+
+@app.get("/auth/permissions")
+def auth_permissions(user: User = Depends(get_current_user)) -> dict:
+    return {"role": user.role, "permissions": permissions_for(user.role)}
+
+
+def _loads(value: str, fallback):
+    try:
+        return json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return fallback
+
+
+def organization_json(profile: OrganizationProfile | None) -> dict:
+    if profile is None:
+        return {"configured": False, "name": "", "industry": "", "description": "", "objectives": [], "constraints": []}
+    return {
+        "configured": True,
+        "id": profile.id,
+        "name": profile.name,
+        "industry": profile.industry,
+        "description": profile.description,
+        "objectives": _loads(profile.objectives_json, []),
+        "constraints": _loads(profile.constraints_json, []),
+        "status": profile.status,
+        "updated_at": profile.updated_at,
+    }
+
+
+def evidence_json(item: EvidenceRecord) -> dict:
+    return {
+        "id": item.id,
+        "node_id": item.node_id,
+        "source_type": item.source_type,
+        "external_id": item.external_id,
+        "event_type": item.event_type,
+        "summary": item.summary,
+        "payload": _loads(item.payload_json, {}),
+        "integrity_digest": item.integrity_digest,
+        "confidence": item.confidence,
+        "status": item.status,
+        "conflict_key": item.conflict_key,
+        "actor_id": item.actor_id,
+        "occurred_at": item.occurred_at,
+        "received_at": item.received_at,
+    }
+
+
+def action_json(item: ActionProposal, node: SupplyChainNode | None = None) -> dict:
+    return {
+        "id": item.id,
+        "node_id": item.node_id,
+        "node_name": node.name if node else None,
+        "title": item.title,
+        "reason": item.reason,
+        "owner_role": item.owner_role,
+        "urgency": item.urgency,
+        "expected_impact": item.expected_impact,
+        "due_at": item.due_at,
+        "status": item.status,
+        "decision_note": item.decision_note,
+        "created_at": item.created_at,
+    }
+
+
+def _node_dict(node: SupplyChainNode) -> dict:
+    return {
+        "id": node.id,
+        "chain_id": node.chain_id,
+        "key": node.key,
+        "name": node.name,
+        "stage_type": node.stage_type,
+        "owner_role": node.owner_role,
+        "position": {"x": node.position_x, "y": node.position_y},
+        "status": node.status,
+        "metadata": _loads(node.metadata_json, {}),
+        "active": node.active,
+        "verified_at": node.verified_at,
+        "verified_by": node.verified_by,
+        "updated_at": node.updated_at,
+    }
+
+
+def _edge_dict(edge: SupplyChainEdge) -> dict:
+    return {"id": edge.id, "source": edge.source_node_id, "target": edge.target_node_id, "label": edge.label, "status": edge.status}
+
+
+def _chain_or_404(db: Session, chain_id: int) -> SupplyChain:
+    chain = db.get(SupplyChain, chain_id)
+    if chain is None:
+        raise HTTPException(status_code=404, detail="Supply chain not found")
+    return chain
+
+
+def _node_or_404(db: Session, node_id: int, require_active: bool = True) -> SupplyChainNode:
+    node = db.get(SupplyChainNode, node_id)
+    if node is None or (require_active and not node.active):
+        raise HTTPException(status_code=404, detail="Supply-chain node not found")
+    return node
+
+
+def _chain_summary(db: Session, chain: SupplyChain) -> dict:
+    nodes = db.scalars(select(SupplyChainNode).where(SupplyChainNode.chain_id == chain.id)).all()
+    pending_by_node = dict(db.execute(select(ActionProposal.node_id, func.count(ActionProposal.id)).where(ActionProposal.status == "pending").group_by(ActionProposal.node_id)).all())
+    status_counts: dict[str, int] = {}
+    for node in nodes:
+        if node.active:
+            status_counts[node.status] = status_counts.get(node.status, 0) + 1
+    severity_order = ["critical", "disputed", "at_risk", "healthy"]
+    worst = next((status for status in severity_order if status_counts.get(status)), "empty")
+    return {
+        "id": chain.id,
+        "key": chain.key,
+        "name": chain.name,
+        "description": chain.description,
+        "status": chain.status,
+        "created_at": chain.created_at,
+        "updated_at": chain.updated_at,
+        "node_count": sum(1 for node in nodes if node.active),
+        "archived_node_count": sum(1 for node in nodes if not node.active),
+        "status_counts": status_counts,
+        "worst_status": worst,
+        "pending_actions": sum(pending_by_node.get(node.id, 0) for node in nodes if node.active),
+        "updated_node_at": max((node.updated_at for node in nodes), default=chain.updated_at),
+    }
+
+
+def _chain_graph(db: Session, chain: SupplyChain) -> dict:
+    nodes = db.scalars(
+        select(SupplyChainNode).where(SupplyChainNode.chain_id == chain.id, SupplyChainNode.active.is_(True)).order_by(SupplyChainNode.position_x)
+    ).all()
+    active_ids = {node.id for node in nodes}
+    edges = db.scalars(select(SupplyChainEdge).order_by(SupplyChainEdge.id)).all()
+    edges = [edge for edge in edges if edge.source_node_id in active_ids and edge.target_node_id in active_ids]
+    pending_by_node = dict(db.execute(select(ActionProposal.node_id, func.count(ActionProposal.id)).where(ActionProposal.status == "pending").group_by(ActionProposal.node_id)).all())
+    return {
+        "chain": _chain_summary(db, chain),
+        "organization": organization_json(db.scalar(select(OrganizationProfile).limit(1))),
+        "nodes": [{**_node_dict(node), "pending_actions": pending_by_node.get(node.id, 0)} for node in nodes],
+        "edges": [_edge_dict(edge) for edge in edges],
+        "updated_at": max((node.updated_at for node in nodes), default=datetime.now(timezone.utc)),
+    }
+
+
+def _run_node_guidance(db: Session, node: SupplyChainNode, actor_id: int | None, force: bool = False) -> tuple[GuidanceRun, list[ActionProposal]]:
+    evidence_rows = db.scalars(select(EvidenceRecord).where(EvidenceRecord.node_id == node.id).order_by(EvidenceRecord.occurred_at.desc()).limit(20)).all()
+    evidence = [evidence_json(item) for item in evidence_rows]
+    node_data = _node_dict(node)
+    profile = organization_json(db.scalar(select(OrganizationProfile).limit(1)))
+    digest = context_digest(node_data, evidence)
+    cached = db.scalar(select(GuidanceRun).where(GuidanceRun.node_id == node.id, GuidanceRun.context_digest == digest).order_by(GuidanceRun.created_at.desc()).limit(1))
+    if cached and not force:
+        actions = db.scalars(select(ActionProposal).where(ActionProposal.guidance_run_id == cached.id).order_by(ActionProposal.created_at.desc())).all()
+        return cached, list(actions)
+    if cached:
+        cached.stale = True
+    provider, payload = guidance_for(node_data, evidence, profile)
+    run = GuidanceRun(
+        node_id=node.id,
+        context_digest=digest,
+        provider=provider,
+        status_summary=payload.status_summary,
+        rationale=payload.rationale,
+        evidence_ids_json=json.dumps(payload.evidence_ids),
+        confidence=payload.confidence,
+        no_action_required=payload.no_action_required,
+        next_check_at=utc_after(payload.next_check_hours),
+    )
+    db.add(run)
+    db.flush()
+    actions: list[ActionProposal] = []
+    for suggestion in payload.actions:
+        existing = db.scalar(select(ActionProposal).where(ActionProposal.node_id == node.id, ActionProposal.title == suggestion.title, ActionProposal.status == "pending"))
+        if existing:
+            actions.append(existing)
+            continue
+        action = ActionProposal(
+            node_id=node.id,
+            guidance_run_id=run.id,
+            title=suggestion.title,
+            reason=suggestion.reason,
+            owner_role=suggestion.owner_role,
+            urgency=suggestion.urgency,
+            expected_impact=suggestion.expected_impact,
+            due_at=utc_after(suggestion.due_hours),
+        )
+        db.add(action)
+        actions.append(action)
+    append_audit(db, "guidance.generated", actor_id, {"node_id": node.id, "provider": provider, "evidence_ids": payload.evidence_ids, "action_count": len(actions)})
+    db.commit()
+    return run, actions
+
+
+def guidance_json(run: GuidanceRun, actions: list[ActionProposal]) -> dict:
+    return {
+        "id": run.id,
+        "provider": run.provider,
+        "status_summary": run.status_summary,
+        "rationale": run.rationale,
+        "evidence_ids": _loads(run.evidence_ids_json, []),
+        "confidence": run.confidence,
+        "no_action_required": run.no_action_required,
+        "next_check_at": run.next_check_at,
+        "stale": run.stale,
+        "actions": [action_json(item) for item in actions],
+        "created_at": run.created_at,
+    }
+
+
+@app.get("/organization/context")
+def get_organization_context(_: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
+    return organization_json(db.scalar(select(OrganizationProfile).limit(1)))
+
+
+@app.put("/organization/context")
+def put_organization_context(
+    body: OrganizationContextRequest,
+    user: User = Depends(require_roles(Role.ADMIN)),
+    db: Session = Depends(get_db),
+) -> dict:
+    profile = db.scalar(select(OrganizationProfile).limit(1))
+    if profile is None:
+        profile = OrganizationProfile(name=body.name)
+        db.add(profile)
+    profile.name = body.name
+    profile.industry = body.industry
+    profile.description = body.description
+    profile.objectives_json = json.dumps(body.objectives)
+    profile.constraints_json = json.dumps(body.constraints)
+    profile.updated_by = user.id
+    append_audit(db, "organization.context_updated", user.id, {"name": body.name, "industry": body.industry})
+    db.commit()
+    db.refresh(profile)
+    return organization_json(profile)
+
+
+@app.get("/users/me/context")
+def get_user_context(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
+    context = db.scalar(select(UserContext).where(UserContext.user_id == user.id))
+    if context is None:
+        return {"configured": False, "owned_stages": [], "decision_limits": {}, "escalation_preferences": {}, "timezone_name": "Asia/Calcutta"}
+    return {
+        "configured": True,
+        "owned_stages": _loads(context.owned_stages_json, []),
+        "decision_limits": _loads(context.decision_limits_json, {}),
+        "escalation_preferences": _loads(context.escalation_preferences_json, {}),
+        "timezone_name": context.timezone_name,
+    }
+
+
+@app.put("/users/me/context")
+def put_user_context(body: UserContextRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
+    context = db.scalar(select(UserContext).where(UserContext.user_id == user.id))
+    if context is None:
+        context = UserContext(user_id=user.id)
+        db.add(context)
+    context.owned_stages_json = json.dumps(body.owned_stages)
+    context.decision_limits_json = json.dumps(body.decision_limits)
+    context.escalation_preferences_json = json.dumps(body.escalation_preferences)
+    context.timezone_name = body.timezone_name
+    append_audit(db, "user.context_updated", user.id, {"owned_stages": body.owned_stages})
+    db.commit()
+    return get_user_context(user, db)
+
+
+@app.get("/supply-chains")
+def list_supply_chains(_: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
+    chains = db.scalars(select(SupplyChain).order_by(SupplyChain.status, SupplyChain.id)).all()
+    return {
+        "chains": [_chain_summary(db, chain) for chain in chains],
+        "default_chain_id": next((chain.id for chain in chains if chain.status == "active"), None),
+    }
+
+
+@app.post("/supply-chains", status_code=201)
+def create_supply_chain(
+    body: SupplyChainCreateRequest,
+    user: User = Depends(require_roles(Role.ADMIN)),
+    db: Session = Depends(get_db),
+) -> dict:
+    if db.scalar(select(SupplyChain).where(SupplyChain.key == body.key)):
+        raise HTTPException(status_code=409, detail="A supply chain with this key already exists")
+    chain = SupplyChain(key=body.key, name=body.name, description=body.description, created_by=user.id)
+    db.add(chain)
+    db.flush()
+    append_audit(db, "supply_chain.chain_created", user.id, {"chain_id": chain.id, "key": chain.key, "name": chain.name})
+    db.commit()
+    return _chain_summary(db, chain)
+
+
+@app.get("/supply-chains/{chain_id}")
+def get_supply_chain_graph(chain_id: int, _: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
+    return _chain_graph(db, _chain_or_404(db, chain_id))
+
+
+@app.put("/supply-chains/{chain_id}")
+def update_supply_chain(
+    chain_id: int,
+    body: SupplyChainUpdateRequest,
+    user: User = Depends(require_roles(Role.ADMIN)),
+    db: Session = Depends(get_db),
+) -> dict:
+    chain = _chain_or_404(db, chain_id)
+    changes: dict[str, object] = {}
+    if body.key is not None and body.key != chain.key:
+        if db.scalar(select(SupplyChain).where(SupplyChain.key == body.key, SupplyChain.id != chain.id)):
+            raise HTTPException(status_code=409, detail="A supply chain with this key already exists")
+        changes["key"] = {"from": chain.key, "to": body.key}
+        chain.key = body.key
+    if body.name is not None and body.name != chain.name:
+        changes["name"] = body.name
+        chain.name = body.name
+    if body.description is not None and body.description != chain.description:
+        changes["description"] = body.description
+        chain.description = body.description
+    if changes:
+        append_audit(db, "supply_chain.chain_updated", user.id, {"chain_id": chain.id, "changes": changes})
+        db.commit()
+    return _chain_summary(db, chain)
+
+
+@app.post("/supply-chains/{chain_id}/archive")
+def archive_supply_chain(chain_id: int, user: User = Depends(require_roles(Role.ADMIN)), db: Session = Depends(get_db)) -> dict:
+    chain = _chain_or_404(db, chain_id)
+    if chain.status == "archived":
+        raise HTTPException(status_code=409, detail="Supply chain is already archived")
+    chain.status = "archived"
+    append_audit(db, "supply_chain.chain_archived", user.id, {"chain_id": chain.id, "key": chain.key})
+    db.commit()
+    return _chain_summary(db, chain)
+
+
+@app.post("/supply-chains/{chain_id}/restore")
+def restore_supply_chain(chain_id: int, user: User = Depends(require_roles(Role.ADMIN)), db: Session = Depends(get_db)) -> dict:
+    chain = _chain_or_404(db, chain_id)
+    if chain.status != "archived":
+        raise HTTPException(status_code=409, detail="Supply chain is not archived")
+    chain.status = "active"
+    append_audit(db, "supply_chain.chain_restored", user.id, {"chain_id": chain.id, "key": chain.key})
+    db.commit()
+    return _chain_summary(db, chain)
+
+
+def _require_editable_chain(db: Session, chain_id: int) -> SupplyChain:
+    chain = _chain_or_404(db, chain_id)
+    if chain.status != "active":
+        raise HTTPException(status_code=409, detail="Restore this supply chain before editing it")
+    return chain
+
+
+@app.post("/supply-chains/{chain_id}/nodes", status_code=201)
+def create_node(
+    chain_id: int,
+    body: NodeCreateRequest,
+    user: User = Depends(require_roles(Role.ADMIN)),
+    db: Session = Depends(get_db),
+) -> dict:
+    chain = _require_editable_chain(db, chain_id)
+    if db.scalar(select(SupplyChainNode).where(SupplyChainNode.chain_id == chain.id, SupplyChainNode.key == body.key)):
+        raise HTTPException(status_code=409, detail="A node with this key already exists in the chain")
+    existing_count = db.scalar(select(func.count(SupplyChainNode.id)).where(SupplyChainNode.chain_id == chain.id)) or 0
+    node = SupplyChainNode(
+        chain_id=chain.id,
+        key=body.key,
+        name=body.name,
+        stage_type=body.stage_type,
+        owner_role=body.owner_role,
+        position_x=body.position_x if body.position_x is not None else float(existing_count * 260),
+        position_y=body.position_y if body.position_y is not None else float(80 if existing_count % 2 else 140),
+        metadata_json=json.dumps(body.metadata, sort_keys=True),
+    )
+    db.add(node)
+    db.flush()
+    append_audit(db, "supply_chain.node_created", user.id, {"node_id": node.id, "chain_id": chain.id, "key": node.key, "name": node.name})
+    db.commit()
+    return _node_dict(node)
+
+
+@app.put("/nodes/{node_id}")
+def update_node(
+    node_id: int,
+    body: NodeUpdateRequest,
+    user: User = Depends(require_roles(Role.ADMIN)),
+    db: Session = Depends(get_db),
+) -> dict:
+    node = _node_or_404(db, node_id, require_active=False)
+    _require_editable_chain(db, node.chain_id)
+    changes: dict[str, object] = {}
+    if body.key is not None and body.key != node.key:
+        if db.scalar(select(SupplyChainNode).where(SupplyChainNode.chain_id == node.chain_id, SupplyChainNode.key == body.key, SupplyChainNode.id != node.id)):
+            raise HTTPException(status_code=409, detail="A node with this key already exists in the chain")
+        changes["key"] = {"from": node.key, "to": body.key}
+        node.key = body.key
+    for field in ("name", "stage_type", "owner_role"):
+        value = getattr(body, field)
+        if value is not None and value != getattr(node, field):
+            changes[field] = value
+            setattr(node, field, value)
+    if body.position_x is not None and body.position_x != node.position_x:
+        changes["position_x"] = body.position_x
+        node.position_x = body.position_x
+    if body.position_y is not None and body.position_y != node.position_y:
+        changes["position_y"] = body.position_y
+        node.position_y = body.position_y
+    if body.metadata is not None:
+        canonical = json.dumps(body.metadata, sort_keys=True)
+        if canonical != node.metadata_json:
+            changes["metadata"] = body.metadata
+            node.metadata_json = canonical
+    if changes:
+        append_audit(db, "supply_chain.node_updated", user.id, {"node_id": node.id, "changes": changes})
+        db.commit()
+    return _node_dict(node)
+
+
+@app.delete("/nodes/{node_id}")
+def deactivate_node(node_id: int, user: User = Depends(require_roles(Role.ADMIN)), db: Session = Depends(get_db)) -> dict:
+    node = _node_or_404(db, node_id, require_active=False)
+    if not node.active:
+        raise HTTPException(status_code=409, detail="Node is already deactivated")
+    node.active = False
+    append_audit(db, "supply_chain.node_deactivated", user.id, {"node_id": node.id, "chain_id": node.chain_id, "key": node.key})
+    db.commit()
+    return _node_dict(node)
+
+
+@app.post("/nodes/{node_id}/activate")
+def activate_node(node_id: int, user: User = Depends(require_roles(Role.ADMIN)), db: Session = Depends(get_db)) -> dict:
+    node = _node_or_404(db, node_id, require_active=False)
+    if node.active:
+        raise HTTPException(status_code=409, detail="Node is already active")
+    node.active = True
+    append_audit(db, "supply_chain.node_activated", user.id, {"node_id": node.id, "chain_id": node.chain_id, "key": node.key})
+    db.commit()
+    return _node_dict(node)
+
+
+@app.post("/supply-chains/{chain_id}/edges", status_code=201)
+def create_edge(
+    chain_id: int,
+    body: EdgeCreateRequest,
+    user: User = Depends(require_roles(Role.ADMIN)),
+    db: Session = Depends(get_db),
+) -> dict:
+    chain = _require_editable_chain(db, chain_id)
+    if body.source_node_id == body.target_node_id:
+        raise HTTPException(status_code=422, detail="An edge cannot connect a node to itself")
+    source = _node_or_404(db, body.source_node_id, require_active=False)
+    target = _node_or_404(db, body.target_node_id, require_active=False)
+    if source.chain_id != chain.id or target.chain_id != chain.id:
+        raise HTTPException(status_code=422, detail="Both endpoints must belong to this supply chain")
+    existing = db.scalar(
+        select(SupplyChainEdge).where(
+            SupplyChainEdge.source_node_id == source.id,
+            SupplyChainEdge.target_node_id == target.id,
+        )
+    )
+    if existing is not None:
+        raise HTTPException(status_code=409, detail="These nodes are already connected")
+    edge = SupplyChainEdge(source_node_id=source.id, target_node_id=target.id, label=body.label)
+    db.add(edge)
+    db.flush()
+    append_audit(db, "supply_chain.edge_created", user.id, {"edge_id": edge.id, "chain_id": chain.id, "source": source.id, "target": target.id})
+    db.commit()
+    return _edge_dict(edge)
+
+
+@app.put("/edges/{edge_id}")
+def update_edge(
+    edge_id: int,
+    body: EdgeUpdateRequest,
+    user: User = Depends(require_roles(Role.ADMIN)),
+    db: Session = Depends(get_db),
+) -> dict:
+    edge = db.get(SupplyChainEdge, edge_id)
+    if edge is None:
+        raise HTTPException(status_code=404, detail="Edge not found")
+    changes: dict = {"edge_id": edge.id}
+    new_source = edge.source_node_id if body.source_node_id is None else body.source_node_id
+    new_target = edge.target_node_id if body.target_node_id is None else body.target_node_id
+    if new_source != edge.source_node_id or new_target != edge.target_node_id:
+        if new_source == new_target:
+            raise HTTPException(status_code=422, detail="An edge cannot connect a node to itself")
+        original = _node_or_404(db, edge.source_node_id, require_active=False)
+        source = _node_or_404(db, new_source, require_active=False)
+        target = _node_or_404(db, new_target, require_active=False)
+        if source.chain_id != original.chain_id or target.chain_id != original.chain_id:
+            raise HTTPException(status_code=422, detail="Both endpoints must belong to this supply chain")
+        existing = db.scalar(
+            select(SupplyChainEdge).where(
+                SupplyChainEdge.source_node_id == source.id,
+                SupplyChainEdge.target_node_id == target.id,
+                SupplyChainEdge.id != edge.id,
+            )
+        )
+        if existing is not None:
+            raise HTTPException(status_code=409, detail="These nodes are already connected")
+        edge.source_node_id = source.id
+        edge.target_node_id = target.id
+        changes.update({"source": source.id, "target": target.id})
+    if body.label is not None and body.label != edge.label:
+        edge.label = body.label
+        changes["label"] = body.label
+    if len(changes) > 1:
+        append_audit(db, "supply_chain.edge_updated", user.id, changes)
+        db.commit()
+    return _edge_dict(edge)
+
+
+@app.delete("/edges/{edge_id}")
+def delete_edge(edge_id: int, user: User = Depends(require_roles(Role.ADMIN)), db: Session = Depends(get_db)) -> dict:
+    edge = db.get(SupplyChainEdge, edge_id)
+    if edge is None:
+        raise HTTPException(status_code=404, detail="Edge not found")
+    payload = {"edge_id": edge.id, "source": edge.source_node_id, "target": edge.target_node_id}
+    db.delete(edge)
+    append_audit(db, "supply_chain.edge_deleted", user.id, payload)
+    db.commit()
+    return {"status": "deleted", **payload}
+
+
+@app.get("/supply-chain")
+def supply_chain(_: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
+    chain = db.scalar(select(SupplyChain).where(SupplyChain.status == "active").order_by(SupplyChain.id))
+    if chain is None:
+        return {"chain": None, "organization": organization_json(db.scalar(select(OrganizationProfile).limit(1))), "nodes": [], "edges": [], "updated_at": datetime.now(timezone.utc)}
+    return _chain_graph(db, chain)
+
+
+def _resolve_evidence_node(body: EvidenceRequest, db: Session) -> SupplyChainNode:
+    if body.node_id is not None:
+        node = db.get(SupplyChainNode, body.node_id)
+        if node is None or not node.active:
+            raise HTTPException(status_code=404, detail="Supply-chain node not found")
+        return node
+    if not body.node_key:
+        raise HTTPException(status_code=422, detail="Provide node_id or node_key")
+    statement = select(SupplyChainNode).where(SupplyChainNode.key == body.node_key, SupplyChainNode.active.is_(True))
+    if body.chain_id is not None:
+        statement = statement.where(SupplyChainNode.chain_id == body.chain_id)
+    matches = db.scalars(statement).all()
+    if not matches:
+        raise HTTPException(status_code=404, detail="Supply-chain node not found")
+    if len(matches) > 1:
+        raise HTTPException(status_code=422, detail="node_key is ambiguous across supply chains; send chain_id or node_id")
+    return matches[0]
+
+
+def _store_evidence(body: EvidenceRequest, source_type: str, user: User, db: Session, node: SupplyChainNode) -> EvidenceRecord:
+    if body.external_id:
+        existing = db.scalar(select(EvidenceRecord).where(EvidenceRecord.external_id == body.external_id))
+        if existing:
+            return existing
+    canonical = json.dumps(body.payload, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(f"{body.event_type}:{body.summary}:{canonical}".encode()).hexdigest()
+    item = EvidenceRecord(
+        node_id=node.id,
+        source_type=source_type,
+        external_id=body.external_id,
+        event_type=body.event_type,
+        summary=body.summary,
+        payload_json=canonical,
+        integrity_digest=digest,
+        confidence=body.confidence,
+        conflict_key=body.conflict_key,
+        actor_id=user.id,
+        occurred_at=(body.occurred_at or datetime.now(timezone.utc)).replace(tzinfo=None),
+    )
+    if body.conflict_key:
+        candidates = db.scalars(select(EvidenceRecord).where(EvidenceRecord.node_id == node.id, EvidenceRecord.conflict_key == body.conflict_key, EvidenceRecord.status == "accepted")).all()
+        if any(candidate.integrity_digest != digest for candidate in candidates):
+            item.status = "disputed"
+            node.status = "disputed"
+            for candidate in candidates:
+                candidate.status = "disputed"
+    if item.status == "accepted" and body.event_type.endswith(("delay", "exception", "blocked")):
+        node.status = "at_risk"
+    # New evidence voids any prior auditor sign-off: the node must be re-verified.
+    node.verified_at = None
+    node.verified_by = None
+    db.add(item)
+    db.flush()
+    append_audit(db, "evidence.received", user.id, {"evidence_id": item.id, "node_id": node.id, "source_type": source_type, "status": item.status, "digest": digest})
+    db.commit()
+    _run_node_guidance(db, node, user.id)
+    return item
+
+
+@app.post("/events")
+def ingest_event(body: EvidenceRequest, user: User = Depends(require_roles(Role.ADMIN, Role.ANALYST)), db: Session = Depends(get_db)) -> dict:
+    node = _resolve_evidence_node(body, db)
+    return evidence_json(_store_evidence(body, "api", user, db, node))
+
+
+@app.post("/nodes/{node_id}/manual-events")
+def add_manual_event(node_id: int, body: EvidenceRequest, user: User = Depends(require_roles(Role.ADMIN, Role.ANALYST, Role.MANAGER)), db: Session = Depends(get_db)) -> dict:
+    node = _node_or_404(db, node_id)
+    return evidence_json(_store_evidence(body, "manual", user, db, node))
+
+
+@app.get("/nodes/{node_id}/inspector")
+def node_inspector(node_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
+    node = db.get(SupplyChainNode, node_id)
+    if node is None or not node.active:
+        raise HTTPException(status_code=404, detail="Supply-chain node not found")
+    evidence = db.scalars(select(EvidenceRecord).where(EvidenceRecord.node_id == node.id).order_by(EvidenceRecord.occurred_at.desc()).limit(50)).all()
+    run, actions = _run_node_guidance(db, node, user.id)
+    return {"node": _node_dict(node), "evidence": [evidence_json(item) for item in evidence], "guidance": guidance_json(run, actions)}
+
+
+@app.post("/nodes/{node_id}/guidance/refresh")
+def refresh_guidance(node_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
+    node = _node_or_404(db, node_id)
+    previous = db.scalars(select(GuidanceRun).where(GuidanceRun.node_id == node.id, GuidanceRun.stale.is_(False))).all()
+    for item in previous:
+        item.stale = True
+    db.commit()
+    run, actions = _run_node_guidance(db, node, user.id, force=True)
+    return guidance_json(run, actions)
+
+
+@app.post("/nodes/{node_id}/verify")
+def verify_node(
+    node_id: int,
+    body: VerifyNodeRequest,
+    user: User = Depends(require_roles(Role.AUDITOR, Role.ADMIN)),
+    db: Session = Depends(get_db),
+) -> dict:
+    node = _node_or_404(db, node_id)
+    node.verified_at = utcnow()
+    node.verified_by = user.id
+    append_audit(db, "node.verified", user.id, {"node_id": node.id, "chain_id": node.chain_id, "key": node.key, "note": body.note})
+    db.commit()
+    return _node_dict(node)
+
+
+@app.get("/actions")
+def action_queue(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> list[dict]:
+    statement = select(ActionProposal).order_by(ActionProposal.status, ActionProposal.due_at, ActionProposal.created_at.desc())
+    if user.role == Role.ANALYST.value:
+        statement = statement.where(ActionProposal.owner_role == user.role)
+    items = db.scalars(statement).all()
+    nodes = {node.id: node for node in db.scalars(select(SupplyChainNode)).all()}
+    return [action_json(item, nodes.get(item.node_id)) for item in items]
+
+
+@app.post("/actions/{action_id}/decision")
+def decide_action(action_id: int, body: ActionDecisionRequest, user: User = Depends(require_roles(Role.ADMIN, Role.MANAGER)), db: Session = Depends(get_db)) -> dict:
+    result = db.execute(update(ActionProposal).where(ActionProposal.id == action_id, ActionProposal.status == body.expected_status).values(status=body.decision, decided_by=user.id, decision_note=body.note))
+    if result.rowcount == 0:
+        existing = db.get(ActionProposal, action_id)
+        if existing is None:
+            raise HTTPException(status_code=404, detail="Action proposal not found")
+        raise HTTPException(status_code=409, detail=f"Action proposal is already {existing.status}")
+    item = db.get(ActionProposal, action_id)
+    append_audit(db, f"action.{body.decision}", user.id, {"action_id": action_id, "note": body.note})
+    db.commit()
+    return action_json(item)
+
+
+@app.post("/actions/{action_id}/escalate")
+def escalate_action(
+    action_id: int,
+    body: EscalateActionRequest,
+    user: User = Depends(require_roles(Role.ADMIN, Role.MANAGER)),
+    db: Session = Depends(get_db),
+) -> dict:
+    item = db.get(ActionProposal, action_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Action proposal not found")
+    if item.status != "pending":
+        raise HTTPException(status_code=409, detail=f"Action proposal is already {item.status}")
+    item.urgency = "critical"
+    append_audit(db, "action.escalated", user.id, {"action_id": action_id, "note": body.note})
+    db.commit()
+    return action_json(item)
 
 
 @app.get("/dashboard")

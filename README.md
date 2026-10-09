@@ -1,6 +1,6 @@
 # SentinelChain AI
 
-SentinelChain AI is a security-first supply-chain control tower. It forecasts demand, calculates inventory policy, scores supplier risk, quarantines suspicious operational data, and keeps a tamper-evident record of every sensitive decision.
+SentinelChain AI is a security-first, graph-based supply-chain control tower. It models each operational stage and handoff, accepts authenticated system events or structured human updates, explains current risk, recommends the next safe action, and keeps a tamper-evident record of every sensitive decision.
 
 > All included data and displayed metrics are synthetic. The application is an academic demonstration, not a production-certified procurement system.
 
@@ -13,6 +13,25 @@ SentinelChain AI is a security-first supply-chain control tower. It forecasts de
 5. SentinelChain blocks the input before it reaches forecasting and contrasts the unsafe order with the protected decision.
 6. A procurement manager must approve any simulated purchase order.
 7. An auditor can verify the complete hash chain.
+
+The primary workspace is an interactive supply-chain topology. Selecting a stage shows its evidence, provenance, confidence, current guidance, downstream impact, and any human approval required. Healthy stages explicitly report when no action is needed and when they will be checked again.
+
+## Multiple supply chains
+
+The demo ships one seeded chain ("Sentinel Industrial Demo"), but the system is multi-chain:
+
+- Administrators can create, rename, archive, and restore any number of supply chains from the **Supply chains** view, and switch between them with the control-tower chain selector.
+- Within a chain, administrators build the graph one stage at a time: **Add stage** creates an individual node (key, name, stage type, owner role, canvas position), **Connect stages** links two nodes into a handoff, and **Handoffs** lists every connection for relabelling or deletion. Stages can be edited, dragged into position, or soft-deactivated (hidden but preserved for audit history); nodes are unique per chain, not globally.
+- Every role sees every chain, but actions are role-scoped and enforced server-side from `GET /auth/permissions`: evidence submission (analyst, manager, admin), decisions (admin, manager), escalation (admin, manager), stage verification (auditor, admin), and chain/node/edge management (admin only). The UI only renders controls the signed-in role may use.
+- New evidence on a stage clears its verification stamp, and auditors re-verify it explicitly (`POST /nodes/{id}/verify`).
+
+## Azure AI Foundry guidance
+
+Copy the Foundry variables from `.env.example` into `backend/.env`, then provide the Foundry `/openai/v1/responses` endpoint, API key, and deployment name. Calls use the OpenAI-compatible Responses API and happen only in the backend. When Foundry is disabled or unavailable, deterministic monitoring continues and the UI identifies the guidance provider.
+
+The model is advisory: evidence is treated as untrusted data, responses are schema-validated, cited evidence IDs must exist, and suggested actions remain pending until an authorized user approves or rejects them. New evidence triggers guidance immediately; a background monitor refreshes guidance after its next-check time.
+
+Customer systems should send normalized events to `POST /events` using an authenticated analyst or administrator account. Operators can add structured manual updates from a selected graph node. Conflicting reports are preserved, marked disputed, and block dependent actions instead of silently overwriting one another.
 
 ## Architecture
 
@@ -122,7 +141,7 @@ cd frontend && npm test -- --run
 cd frontend && npm run build
 ```
 
-The backend suite covers authentication, role boundaries, HMAC tamper detection, AES-GCM behavior, quarantine isolation, duplicate imports, forecasting, approval conflicts, attack containment, and audit-chain tampering. The frontend suite covers login success and recoverable authentication failure. A Playwright scenario exercises the full attack demonstration.
+The backend suite covers authentication, role boundaries, multi-chain and node administration, permission enforcement, evidence, HMAC tamper detection, AES-GCM behavior, quarantine isolation, duplicate imports, forecasting, approval conflicts, attack containment, and audit-chain tampering. The frontend suite covers login success, recoverable authentication failure, and role-gated navigation. A Playwright scenario exercises the full attack demonstration plus an admin flow that creates a chain, adds individual stages, and links them into a handoff.
 
 ## Deployment
 
@@ -149,3 +168,7 @@ frontend/src/      React control tower
 frontend/tests/    component and Playwright tests
 .github/workflows/ CI and dependency checks
 ```
+
+## Classroom documentation
+
+Start with [docs/README.md](docs/README.md) for a plain-language project overview, a 6-8 minute live demo script, the technical reference, and a copy-paste prompt for generating the class presentation.

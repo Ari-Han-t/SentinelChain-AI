@@ -5,7 +5,7 @@ export default defineConfig({
   use: { baseURL: 'http://127.0.0.1:5173', trace: 'on-first-retry' },
   webServer: [
     { command: 'npm run dev', url: 'http://127.0.0.1:5173', reuseExistingServer: true },
-    { command: 'cd ../backend && uvicorn app.main:app --port 8000', url: 'http://127.0.0.1:8000/health', reuseExistingServer: true },
+    { command: 'cd ../backend && "C:/Users/Arihant Gupta/Desktop/infosec_project/.venv313/Scripts/python.exe" -m uvicorn app.main:app --port 8000', url: 'http://127.0.0.1:8000/health', reuseExistingServer: true },
   ],
 })
 

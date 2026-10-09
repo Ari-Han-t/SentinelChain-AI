@@ -4,13 +4,25 @@ from pathlib import Path
 os.environ["DATABASE_URL"] = "sqlite:///./test-sentinelchain.db"
 os.environ["SEED_DEMO_DATA"] = "false"
 os.environ["RATE_LIMIT_PER_MINUTE"] = "10000"
+os.environ["AI_PROVIDER"] = "deterministic"
+os.environ["AZURE_AI_FOUNDRY_ENABLED"] = "false"
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
 from app.database import Base, engine
 from app.main import app
 from app.seed import seed_database
+
+
+@pytest.fixture(autouse=True)
+def block_external_http(monkeypatch):
+    def reject_request(*args, **kwargs):
+        pytest.fail("Tests must not make external HTTP requests")
+
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", reject_request)
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", reject_request)
 
 
 @pytest.fixture(autouse=True)

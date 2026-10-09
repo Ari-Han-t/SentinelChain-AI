@@ -1,174 +1,196 @@
+import { Background, Controls, Edge, Handle, MarkerType, Node, NodeProps, Position, ReactFlow, ReactFlowProvider, applyEdgeChanges, applyNodeChanges, useReactFlow } from '@xyflow/react'
+import '@xyflow/react/dist/style.css'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { Activity, AlertTriangle, ArrowRight, Bot, Check, ChevronRight, CircleDot, Clock3, Database, FileClock, GitBranch, Layers, Link2, LogOut, Menu, Moon, Pencil, Plus, RefreshCw, Search, Settings, ShieldCheck, Sun, Trash2, X } from 'lucide-react'
+import { FormEvent, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  Activity,
-  AlertTriangle,
-  Boxes,
-  Check,
-  ChevronRight,
-  ClipboardCheck,
-  DatabaseZap,
-  FileClock,
-  Gauge,
-  LogOut,
-  PackageCheck,
-  Radar,
-  ShieldCheck,
-  ShieldX,
-  Sparkles,
-  Truck,
-  X,
-} from 'lucide-react'
-import { FormEvent, useState } from 'react'
-import {
-  DashboardData,
+  NodeInspector as InspectorData,
+  OrganizationContext,
+  SupplyChainNode,
+  SupplyChainSummary,
   User,
-  decideRecommendation,
-  generateRecommendation,
-  getAlerts,
+  activateNode,
+  addManualEvent,
+  archiveSupplyChain,
+  createEdge,
+  createNode,
+  createSupplyChain,
+  decideAction,
+  deactivateNode,
+  deleteEdge,
+  escalateAction,
+  getActions,
   getAudit,
-  getDashboard,
-  getSuppliers,
+  getChainGraph,
+  getNodeInspector,
+  getPermissions,
+  getSupplyChain,
+  listSupplyChains,
   login,
+  refreshGuidance,
+  restoreSupplyChain,
   runAttack,
-  trainForecast,
+  updateEdge,
+  updateNode,
+  updateOrganization,
+  updateSupplyChain,
+  updateUserContext,
+  verifyNode,
 } from './api'
-import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 
 type Session = { token: string; user: User }
-type View = 'overview' | 'suppliers' | 'security' | 'approvals' | 'audit'
+type View = 'control' | 'actions' | 'evidence' | 'chains' | 'settings'
+type Theme = 'dark' | 'light'
 
-const roleLabel: Record<string, string> = {
-  administrator: 'Administrator',
-  inventory_analyst: 'Inventory Analyst',
-  procurement_manager: 'Procurement Manager',
-  auditor: 'Auditor',
+const roles = [
+  ['Administrator', 'admin@sentinelchain.local'],
+  ['Inventory analyst', 'analyst@sentinelchain.local'],
+  ['Procurement manager', 'manager@sentinelchain.local'],
+  ['Auditor', 'auditor@sentinelchain.local'],
+] as const
+const roleLabel: Record<string, string> = { administrator: 'Administrator', inventory_analyst: 'Inventory analyst', procurement_manager: 'Procurement manager', auditor: 'Auditor' }
+const stageTypes = ['demand', 'supplier', 'procurement', 'production', 'logistics', 'customer', 'quality', 'process']
+
+function ThemeToggle({ theme, onToggle, className = '' }: { theme: Theme; onToggle: () => void; className?: string }) {
+  const nextTheme = theme === 'dark' ? 'light' : 'dark'
+  return <button type="button" className={`theme-toggle ${className}`} onClick={onToggle} aria-label={`Switch to ${nextTheme} mode`} title={`Switch to ${nextTheme} mode`}>{theme === 'dark' ? <Sun/> : <Moon/>}<span>{nextTheme} mode</span></button>
 }
 
-function Login({ onLogin }: { onLogin: (session: Session) => void }) {
-  const [email, setEmail] = useState('admin@sentinelchain.local')
+function Login({ onLogin, theme, onToggleTheme }: { onLogin: (session: Session) => void; theme: Theme; onToggleTheme: () => void }) {
+  const [email, setEmail] = useState<string>(roles[0][1])
   const [password, setPassword] = useState('demo1234')
-  const mutation = useMutation({ mutationFn: () => login(email, password), onSuccess: (data) => onLogin({ token: data.access_token, user: data.user }) })
-
-  function submit(event: FormEvent) {
-    event.preventDefault()
-    mutation.mutate()
-  }
-
-  return (
-    <main className="login-shell">
-      <section className="login-story">
-        <div className="brand-mark"><ShieldCheck size={24} /><span>SentinelChain AI</span></div>
-        <div>
-          <span className="eyebrow">SECURE SUPPLY CHAIN INTELLIGENCE</span>
-          <h1>Trust every signal.<br />Approve every action.</h1>
-          <p>Forecast demand, isolate poisoned data, and protect procurement decisions with evidence that cannot be quietly rewritten.</p>
-        </div>
-        <div className="trust-strip">
-          <span><span className="status-dot" /> HMAC verified imports</span>
-          <span><span className="status-dot" /> Human-approved orders</span>
-          <span><span className="status-dot" /> Hash-chained audit</span>
-        </div>
-      </section>
-      <section className="login-panel">
-        <form className="login-card" onSubmit={submit}>
-          <div className="mobile-brand"><ShieldCheck size={22} /> SentinelChain AI</div>
-          <p className="eyebrow">CONTROL TOWER ACCESS</p>
-          <h2>Welcome back</h2>
-          <p className="muted">Use a seeded role to explore the synthetic demo.</p>
-          <label>Email<input aria-label="Email" value={email} onChange={(event) => setEmail(event.target.value)} type="email" /></label>
-          <label>Password<input aria-label="Password" value={password} onChange={(event) => setPassword(event.target.value)} type="password" /></label>
-          {mutation.error && <div className="error-banner">{mutation.error.message}</div>}
-          <button className="primary-button" disabled={mutation.isPending}>{mutation.isPending ? 'Authenticating…' : 'Enter control tower'} <ChevronRight size={17} /></button>
-          <div className="demo-note"><Sparkles size={16} /><span>Demo: all seeded accounts use <code>demo1234</code></span></div>
-        </form>
-      </section>
-    </main>
-  )
+  const mutation = useMutation({ mutationFn: () => login(email, password), onSuccess: data => onLogin({ token: data.access_token, user: data.user }) })
+  function submit(event: FormEvent) { event.preventDefault(); mutation.mutate() }
+  return <main className="login-shell"><ThemeToggle theme={theme} onToggle={onToggleTheme} className="login-theme"/>
+    <section className="login-manifesto"><div className="wordmark"><ShieldCheck /> SENTINELCHAIN</div><div className="manifesto-copy"><span className="kicker">SECURE OPERATIONS GRAPH</span><h1>See the chain.<br/>Understand the risk.<br/>Act with evidence.</h1><p>Every supplier, handoff, decision, and exception in one monitored operating model.</p></div><div className="manifesto-flow"><span>OBSERVE</span><ArrowRight/><span>EXPLAIN</span><ArrowRight/><span>APPROVE</span></div></section>
+    <section className="login-access"><form onSubmit={submit} className="access-form"><div><span className="kicker">CONTROL TOWER ACCESS</span><h2>Choose your operating lens</h2><p>One shared chain. Permissions and priorities follow your role.</p></div><div className="role-picker">{roles.map(([label, value]) => <button type="button" key={value} className={email === value ? 'selected' : ''} onClick={() => setEmail(value)}><span>{label}</span><small>{value.split('@')[0]}</small></button>)}</div><label>Email<input aria-label="Email" value={email} onChange={event => setEmail(event.target.value)} type="email"/></label><label>Password<input aria-label="Password" value={password} onChange={event => setPassword(event.target.value)} type="password"/></label>{mutation.error && <div className="notice danger">{mutation.error.message}</div>}<button className="enter-button" disabled={mutation.isPending}>{mutation.isPending ? 'Authenticating…' : 'Enter shared workspace'}<ChevronRight/></button><p className="demo-caption">Synthetic environment · all demo accounts use <code>demo1234</code></p></form></section>
+  </main>
 }
 
-function KpiCard({ label, value, detail, icon: Icon, tone = 'cyan' }: { label: string; value: number | string; detail: string; icon: typeof Gauge; tone?: string }) {
-  return <article className={`kpi-card tone-${tone}`}><div className="kpi-icon"><Icon size={19} /></div><div><p>{label}</p><strong>{value}</strong><small>{detail}</small></div></article>
+type ProcessNodeData = { item: SupplyChainNode; selected: boolean }
+function ProcessNode({ data }: NodeProps<Node<ProcessNodeData>>) {
+  const { item, selected } = data
+  return <div className={`process-node state-${item.status} ${selected ? 'is-selected' : ''}`}><Handle type="target" position={Position.Left}/><div className="node-index">{String(item.id).padStart(2, '0')}</div><div className="node-main"><span>{item.stage_type}</span><strong>{item.name}</strong><small>{roleLabel[item.owner_role] ?? item.owner_role}</small></div><div className="node-state"><i/><span>{item.status.replace('_', ' ')}</span>{item.verified_at && <em className="node-verified" title="Verified by an auditor"><ShieldCheck/></em>}{item.pending_actions != null && item.pending_actions > 0 && <b>{item.pending_actions}</b>}</div><Handle type="source" position={Position.Right}/></div>
+}
+const nodeTypes = { process: ProcessNode }
+
+type EdgeHandlers = { onConnectEdge?:(source:number,target:number)=>void; onReconnectEdge?:(edgeId:number,source:number,target:number)=>void; onDeleteEdges?:(edgeIds:number[])=>void }
+function FlowCanvas({ items, edges, selectedId, onSelect, editable, onReposition, onConnectEdge, onReconnectEdge, onDeleteEdges, theme }: { items: SupplyChainNode[]; edges: Array<{ id:number; source:number; target:number; label:string; status:string }>; selectedId: number | null; onSelect: (id:number)=>void; editable?: boolean; onReposition?: (id:number, position:{x:number;y:number})=>void; theme?:Theme } & EdgeHandlers) {
+  const rf = useReactFlow()
+  const nodeCount = items.length
+  useEffect(() => { rf.fitView({ padding: 0.2, duration: 250 }) }, [nodeCount])
+  const build = (): Node<ProcessNodeData>[] => items.map(item => ({ id: String(item.id), type: 'process', position: item.position, deletable: false, data: { item, selected: selectedId === item.id } }))
+  const [flowNodes, setFlowNodes] = useState<Node<ProcessNodeData>[]>(build)
+  useEffect(() => { setFlowNodes(build()) }, [items, selectedId])
+  const dark = theme !== 'light'
+  const buildEdges = (): Edge[] => edges.map(edge => ({ id: String(edge.id), source: String(edge.source), target: String(edge.target), label: edge.label, labelStyle: { fill: dark ? '#7e858b' : '#626b71', fontSize: 10, fontFamily: 'var(--font-mono)' }, labelBgStyle: { fill: dark ? '#0b0e10' : '#f8f9f9' }, labelBgPadding: [6, 3], className: `flow-edge state-${edge.status}`, markerEnd: { type: MarkerType.ArrowClosed } }))
+  const [flowEdges, setFlowEdges] = useState<Edge[]>(buildEdges)
+  useEffect(() => { setFlowEdges(buildEdges()) }, [edges, theme])
+  const connecting = Boolean(editable && onConnectEdge)
+  return <div className="topology-wrap" aria-label="Interactive supply-chain topology"><ReactFlow nodes={flowNodes} edges={flowEdges} nodeTypes={nodeTypes} onNodeClick={(_, node) => onSelect(Number(node.id))} onNodesChange={editable ? changes => setFlowNodes(current => applyNodeChanges(changes, current)) : undefined} onEdgesChange={changes => setFlowEdges(current => applyEdgeChanges(changes, current))} onNodeDragStop={(_, node) => onReposition?.(Number(node.id), node.position)} onConnect={connecting && onConnectEdge ? params => { if (params.source && params.target) onConnectEdge(Number(params.source), Number(params.target)) } : undefined} nodesConnectable={connecting} edgesReconnectable={Boolean(editable && onReconnectEdge)} onReconnect={onReconnectEdge ? (oldEdge, conn) => { if (conn.source && conn.target) onReconnectEdge(Number(oldEdge.id), Number(conn.source), Number(conn.target)) } : undefined} deleteKeyCode={editable && onDeleteEdges ? ['Backspace', 'Delete'] : null} onEdgesDelete={onDeleteEdges ? deleted => onDeleteEdges(deleted.map(edge => Number(edge.id))) : undefined} fitView fitViewOptions={{ padding: 0.2 }} minZoom={0.5} maxZoom={1.6} nodesDraggable={Boolean(editable)} elementsSelectable><Background color="var(--graph-grid)" gap={32} size={1}/><Controls showInteractive={false}/></ReactFlow></div>
+}
+function Topology(props: { items: SupplyChainNode[]; edges: Array<{ id:number; source:number; target:number; label:string; status:string }>; selectedId: number | null; onSelect: (id:number)=>void; editable?: boolean; onReposition?: (id:number, position:{x:number;y:number})=>void; theme?:Theme } & EdgeHandlers) {
+  return <ReactFlowProvider><FlowCanvas {...props}/></ReactFlowProvider>
 }
 
-function Overview({ data, token }: { data: DashboardData; token: string }) {
-  const client = useQueryClient()
-  const [message, setMessage] = useState('')
-  const build = useMutation({
-    mutationFn: async (sku: string) => {
-      await trainForecast(token, sku)
-      return generateRecommendation(token, sku)
-    },
-    onSuccess: (item) => {
-      setMessage(`Recommendation #${item.id} generated for ${item.sku}.`)
-      client.invalidateQueries({ queryKey: ['dashboard'] })
-    },
+function Guidance({ inspector, canDecide, canEscalate, onDecision, onEscalate, onRefresh }: { inspector: InspectorData; canDecide: boolean; canEscalate: boolean; onDecision:(id:number,d:'approved'|'rejected')=>void; onEscalate:(id:number)=>void; onRefresh:()=>void }) {
+  const guide = inspector.guidance
+  return <section className="guidance-block"><div className="section-label"><Bot/>GUIDANCE <span>{guide.provider}</span><button aria-label="Refresh guidance" onClick={onRefresh}><RefreshCw/></button></div><div className={guide.no_action_required ? 'guidance-status calm' : 'guidance-status alert'}>{guide.no_action_required ? <Check/> : <AlertTriangle/>}<div><strong>{guide.no_action_required ? 'No action needed' : guide.status_summary}</strong><p>{guide.rationale}</p></div></div><div className="guide-meta"><span>Confidence {Math.round(guide.confidence * 100)}%</span><span>Next check {new Date(guide.next_check_at).toLocaleString()}</span></div>{guide.actions.map(action => <article className="action-brief" key={action.id}><div><span className="urgency">{action.urgency}</span><h4>{action.title}</h4><p>{action.reason}</p><small>Expected impact · {action.expected_impact}</small></div>{action.status === 'pending' && (canDecide || canEscalate) && <div className="decision-buttons">{canEscalate && action.urgency !== 'critical' && <button onClick={() => onEscalate(action.id)}>Escalate</button>}{canDecide && <><button onClick={() => onDecision(action.id, 'rejected')}><X/>Reject</button><button className="solid" onClick={() => onDecision(action.id, 'approved')}><Check/>Approve</button></>}</div>}</article>)}</section>
+}
+
+function Inspector({ token, node, canOperate, canDecide, canEscalate, canVerify, canManage, onClose, onEdit }: { token:string; node:SupplyChainNode; canOperate:boolean; canDecide:boolean; canEscalate:boolean; canVerify:boolean; canManage:boolean; onClose:()=>void; onEdit:()=>void }) {
+  const client = useQueryClient(); const [showForm, setShowForm] = useState(false); const [summary, setSummary] = useState(''); const [eventType, setEventType] = useState('process.update')
+  const query = useQuery({ queryKey:['node-inspector',node.id], queryFn:()=>getNodeInspector(token,node.id) })
+  const refresh = useMutation({ mutationFn:()=>refreshGuidance(token,node.id), onSuccess:()=>client.invalidateQueries({queryKey:['node-inspector',node.id]}) })
+  const manual = useMutation({ mutationFn:()=>addManualEvent(token,node,{event_type:eventType,summary,conflict_key:`${node.key}:current-state`}), onSuccess:()=>{setSummary('');setShowForm(false);client.invalidateQueries({queryKey:['node-inspector',node.id]});client.invalidateQueries({queryKey:['supply-chain']})} })
+  const decision = useMutation({ mutationFn:({id,d}:{id:number;d:'approved'|'rejected'})=>decideAction(token,id,d), onSuccess:()=>{client.invalidateQueries({queryKey:['node-inspector',node.id]});client.invalidateQueries({queryKey:['actions']})} })
+  const escalate = useMutation({ mutationFn:(id:number)=>escalateAction(token,id,'Escalated from the control tower'), onSuccess:()=>{client.invalidateQueries({queryKey:['node-inspector',node.id]});client.invalidateQueries({queryKey:['actions']})} })
+  const verify = useMutation({ mutationFn:()=>verifyNode(token,node.id,'Reviewed against cited evidence'), onSuccess:()=>client.invalidateQueries({queryKey:['node-inspector',node.id]}) })
+  const removal = useMutation({ mutationFn:()=>deactivateNode(token,node.id), onSuccess:()=>{client.invalidateQueries({queryKey:['supply-chain']});client.invalidateQueries({queryKey:['supply-chains']});onClose()} })
+  return <aside className="inspector"><header><div><span className="kicker">SELECTED STAGE</span><h2>{node.name}</h2><p>{node.stage_type} · owned by {roleLabel[node.owner_role] ?? node.owner_role}</p>{node.verified_at ? <p className="verified-line"><ShieldCheck/>Verified {new Date(node.verified_at).toLocaleString()}</p> : canVerify && <p className="verified-line muted">Not yet verified by an auditor</p>}</div><button className="icon-button" onClick={onClose} aria-label="Close inspector"><X/></button></header>{(canVerify || canManage) && <div className="node-controls">{canVerify && <button onClick={()=>verify.mutate()} disabled={verify.isPending || Boolean(node.verified_at)}><ShieldCheck/>{node.verified_at ? 'Verified' : 'Verify stage'}</button>}{canManage && <button onClick={onEdit}><Pencil/>Edit stage</button>}{canManage && <button className="danger" onClick={()=>removal.mutate()} disabled={removal.isPending}><Trash2/>Deactivate</button>}</div>}{verify.error && <div className="notice danger">{verify.error.message}</div>}{removal.error && <div className="notice danger">{removal.error.message}</div>}{query.isLoading && <div className="inspector-loading">Reading evidence and guidance…</div>}{query.error && <div className="notice danger">{query.error.message}</div>}{query.data && <><Guidance inspector={query.data} canDecide={canDecide} canEscalate={canEscalate} onDecision={(id,d)=>decision.mutate({id,d})} onEscalate={id=>escalate.mutate(id)} onRefresh={()=>refresh.mutate()}/><section className="evidence-block"><div className="section-label"><Database/>EVIDENCE <span>{query.data.evidence.length} records</span>{canOperate && <button onClick={()=>setShowForm(!showForm)}><Plus/>Add update</button>}</div>{showForm && <form className="manual-form" onSubmit={event=>{event.preventDefault();manual.mutate()}}><label>What happened?<textarea value={summary} onChange={event=>setSummary(event.target.value)} required placeholder="Describe the operational event and its source."/></label><label>Event type<select value={eventType} onChange={event=>setEventType(event.target.value)}><option>process.update</option><option>supplier.delay</option><option>inventory.exception</option><option>shipment.received</option></select></label><button className="solid" disabled={manual.isPending}>Record signed update</button></form>}<div className="evidence-list">{query.data.evidence.length ? query.data.evidence.map(item=><article key={item.id} className={item.status === 'disputed' ? 'disputed' : ''}><i/><div><strong>{item.summary}</strong><p>{item.source_type} · {new Date(item.occurred_at).toLocaleString()}</p></div><span>{Math.round(item.confidence*100)}%</span></article>) : <div className="empty-state"><Database/><strong>No evidence recorded</strong><p>Connect a source or record a verified update.</p></div>}</div></section></>}</aside>
+}
+
+function NodeEditor({ token, chainId, node, onClose, onSaved }: { token:string; chainId:number; node: SupplyChainNode | null; onClose:()=>void; onSaved:(saved:SupplyChainNode)=>void }) {
+  const editing = node !== null
+  const [form, setForm] = useState({ key: node?.key ?? '', name: node?.name ?? '', stage_type: node?.stage_type ?? 'process', owner_role: node?.owner_role ?? 'inventory_analyst', position_x: node ? String(node.position.x) : '', position_y: node ? String(node.position.y) : '' })
+  const parse = (value: string) => value.trim() === '' ? undefined : Number(value)
+  const mutation = useMutation({
+    mutationFn: () => editing
+      ? updateNode(token, node.id, { key: form.key, name: form.name, stage_type: form.stage_type, owner_role: form.owner_role, position_x: parse(form.position_x), position_y: parse(form.position_y) })
+      : createNode(token, chainId, { key: form.key, name: form.name, stage_type: form.stage_type, owner_role: form.owner_role, position_x: parse(form.position_x), position_y: parse(form.position_y) }),
+    onSuccess: saved => { onSaved(saved); onClose() },
   })
-  return <>
-    <div className="page-heading"><div><p className="eyebrow">LIVE OPERATIONS</p><h1>Supply chain overview</h1><p>Verified operational data only. Every value below is synthetic.</p></div><span className="verified-pill"><ShieldCheck size={15} /> Data chain verified</span></div>
-    <section className="kpi-grid">
-      <KpiCard label="Tracked SKUs" value={data.kpis.total_skus} detail="Across synthetic catalog" icon={Boxes} />
-      <KpiCard label="Stock watchlist" value={data.kpis.low_stock_skus} detail="Below lead-time threshold" icon={Gauge} tone="amber" />
-      <KpiCard label="Security alerts" value={data.kpis.open_security_alerts} detail="Integrity and access" icon={ShieldX} tone="red" />
-      <KpiCard label="Awaiting approval" value={data.kpis.pending_approvals} detail="No autonomous orders" icon={ClipboardCheck} tone="green" />
-    </section>
-    <section className="dashboard-grid">
-      <article className="panel demand-panel">
-        <div className="panel-header"><div><p className="eyebrow">30-DAY SIGNAL</p><h2>Aggregate demand</h2></div><span className="synthetic-tag">SYNTHETIC</span></div>
-        <div className="chart-wrap"><ResponsiveContainer width="100%" height="100%"><AreaChart data={data.demand_series}><defs><linearGradient id="demand" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#38d7e8" stopOpacity={0.4}/><stop offset="100%" stopColor="#38d7e8" stopOpacity={0}/></linearGradient></defs><CartesianGrid stroke="#173047" vertical={false}/><XAxis dataKey="date" hide/><YAxis stroke="#6d8499" tickLine={false} axisLine={false}/><Tooltip contentStyle={{ background: '#0d1b2a', border: '1px solid #20394f', borderRadius: 10 }}/><Area type="monotone" dataKey="quantity" stroke="#38d7e8" strokeWidth={2.5} fill="url(#demand)"/></AreaChart></ResponsiveContainer></div>
-      </article>
-      <article className="panel alert-panel">
-        <div className="panel-header"><div><p className="eyebrow">ACTIVE SIGNALS</p><h2>Risk queue</h2></div><AlertTriangle size={19} className="amber" /></div>
-        <div className="stack-list">{data.alerts.length ? data.alerts.map((alert) => <div className="alert-row" key={alert.id}><span className={`severity ${alert.severity}`} /><div><strong>{alert.title}</strong><p>{alert.detail}</p></div></div>) : <div className="empty">No open alerts</div>}</div>
-      </article>
-    </section>
-    <article className="panel inventory-panel">
-      <div className="panel-header"><div><p className="eyebrow">INVENTORY HEALTH</p><h2>Decision-ready products</h2></div>{message && <span className="success-note">{message}</span>}</div>
-      <div className="table-wrap"><table><thead><tr><th>Product</th><th>On hand</th><th>Lead time</th><th>Health</th><th></th></tr></thead><tbody>{data.products.map((product) => <tr key={product.sku}><td><strong>{product.name}</strong><span>{product.sku}</span></td><td>{product.current_stock} units</td><td>{product.lead_time_days} days</td><td><span className={`health ${product.health}`}>{product.health}</span></td><td><button className="quiet-button" onClick={() => build.mutate(product.sku)} disabled={build.isPending}>{build.isPending ? 'Calculating…' : 'Forecast + recommend'}</button></td></tr>)}</tbody></table></div>
-      {build.error && <div className="error-banner">{build.error.message}</div>}
-    </article>
-  </>
+  return <form className="node-editor" onSubmit={event=>{event.preventDefault();mutation.mutate()}}><div className="section-label">{editing ? <><Pencil/>EDIT STAGE</> : <><Plus/>NEW STAGE</>}</div><div className="field-pair"><label>Key<input value={form.key} onChange={event=>setForm({...form,key:event.target.value})} required pattern="[a-z0-9][a-z0-9_-]*" placeholder="cold-storage"/><small>Unique inside this chain, lowercase.</small></label><label>Name<input value={form.name} onChange={event=>setForm({...form,name:event.target.value})} required placeholder="Cold storage"/></label></div><div className="field-pair"><label>Stage type<select value={form.stage_type} onChange={event=>setForm({...form,stage_type:event.target.value})}>{stageTypes.map(type=><option key={type}>{type}</option>)}</select></label><label>Owner role<select value={form.owner_role} onChange={event=>setForm({...form,owner_role:event.target.value})}>{Object.entries(roleLabel).map(([value,label])=><option key={value} value={value}>{label}</option>)}</select></label></div><div className="field-pair"><label>Position X<input inputMode="numeric" value={form.position_x} onChange={event=>setForm({...form,position_x:event.target.value})} placeholder="auto"/></label><label>Position Y<input inputMode="numeric" value={form.position_y} onChange={event=>setForm({...form,position_y:event.target.value})} placeholder="auto"/></label></div>{mutation.error && <div className="notice danger">{mutation.error.message}</div>}<div className="editor-actions"><button type="button" className="quiet-link" onClick={onClose}>Cancel</button><button className="solid" disabled={mutation.isPending}>{editing ? 'Save stage' : 'Create stage'}</button></div></form>
 }
 
-function Suppliers({ token }: { token: string }) {
-  const query = useQuery({ queryKey: ['suppliers'], queryFn: () => getSuppliers(token) })
-  return <><div className="page-heading"><div><p className="eyebrow">SUPPLIER INTELLIGENCE</p><h1>Risk scorecards</h1><p>Weighted from reliability, lead time, defects, and price variance.</p></div></div><section className="card-grid">{query.data?.map((supplier) => <article className="supplier-card" key={supplier.id}><div className="supplier-top"><div className="supplier-icon"><Truck /></div><span className={`risk-score ${supplier.risk_score > 35 ? 'high' : supplier.risk_score > 20 ? 'medium' : 'low'}`}>{supplier.risk_score}</span></div><h2>{supplier.name}</h2><p>Composite risk / 100</p><dl><div><dt>Reliability</dt><dd>{Math.round(supplier.reliability * 100)}%</dd></div><div><dt>Avg. lead time</dt><dd>{supplier.average_lead_time}d</dd></div><div><dt>Defect rate</dt><dd>{(supplier.defect_rate * 100).toFixed(1)}%</dd></div><div><dt>Price variance</dt><dd>{(supplier.price_variance * 100).toFixed(1)}%</dd></div></dl></article>)}</section></>
+function ActionQueue({ token, canDecide, canEscalate }: { token:string; canDecide:boolean; canEscalate:boolean }) {
+  const client = useQueryClient(); const query = useQuery({queryKey:['actions'],queryFn:()=>getActions(token)}); const mutation = useMutation({mutationFn:({id,d}:{id:number;d:'approved'|'rejected'})=>decideAction(token,id,d),onSuccess:()=>client.invalidateQueries({queryKey:['actions']})}); const escalate = useMutation({mutationFn:(id:number)=>escalateAction(token,id,'Escalated from the action queue'),onSuccess:()=>client.invalidateQueries({queryKey:['actions']})})
+  return <section className="page-view"><div className="page-title"><span className="kicker">HUMAN DECISION LAYER</span><h1>Action queue</h1><p>Every material recommendation remains a proposal until an authorized person decides.</p></div><div className="queue-list">{query.data?.length ? query.data.map(item=><article key={item.id}><div className="queue-status"><i/><span>{item.urgency}</span></div><div><small>{item.node_name}</small><h3>{item.title}</h3><p>{item.reason}</p><span>Impact · {item.expected_impact}</span></div><div className="queue-decision"><b>{item.status}</b>{canEscalate&&item.status==='pending'&&item.urgency!=='critical'&&<button onClick={()=>escalate.mutate(item.id)}>Escalate</button>}{canDecide&&item.status==='pending'&&<><button onClick={()=>mutation.mutate({id:item.id,d:'rejected'})}>Reject</button><button className="solid" onClick={()=>mutation.mutate({id:item.id,d:'approved'})}>Approve</button></>}</div></article>) : <div className="empty-state"><Check/><strong>Queue clear</strong><p>No operational decisions need attention.</p></div>}</div></section>
 }
 
-function SecurityLab({ token }: { token: string }) {
-  const [result, setResult] = useState<Awaited<ReturnType<typeof runAttack>> | null>(null)
-  const mutation = useMutation({ mutationFn: (type: string) => runAttack(token, type), onSuccess: setResult })
-  const attacks = [
-    ['demand_poisoning', 'Demand poisoning', 'Inject a 12,000-unit spike into a verified demand stream.'],
-    ['inventory_manipulation', 'Stock manipulation', 'Attempt an impossible negative inventory adjustment.'],
-    ['supplier_spoofing', 'Supplier spoofing', 'Present an unverified look-alike supplier identity.'],
-  ]
-  return <><div className="page-heading"><div><p className="eyebrow">ADMIN-ONLY SANDBOX</p><h1>Attack and recovery lab</h1><p>Run controlled attacks against synthetic data. Production mode disables this endpoint.</p></div><span className="danger-pill"><DatabaseZap size={15}/> Demo environment</span></div><section className="attack-grid">{attacks.map(([id, title, description]) => <button className="attack-card" key={id} onClick={() => mutation.mutate(id)} disabled={mutation.isPending}><Radar /><span><strong>{title}</strong><small>{description}</small></span><ChevronRight /></button>)}</section>{mutation.error && <div className="error-banner">{mutation.error.message}</div>}{result && <article className="comparison-panel"><div className="result-title"><ShieldCheck/><div><p className="eyebrow">ATTACK CONTAINED</p><h2>{result.message}</h2></div></div><div className="comparison-grid"><div className="unsafe"><span>Without controls</span><strong>{result.unsafe_decision.purchase_quantity.toLocaleString()} units</strong><p>Unsafe purchase from compromised input</p></div><div className="protected"><span>SentinelChain decision</span><strong>{result.protected_decision.purchase_quantity.toLocaleString()} units</strong><p>Last verified data remains in control</p></div></div></article>}</>
+function EvidenceView({ token, canAudit }: { token:string; canAudit:boolean }) {
+  const query = useQuery({queryKey:['audit'],queryFn:()=>getAudit(token),enabled:canAudit})
+  if(!canAudit) return <section className="page-view"><div className="empty-state"><ShieldCheck/><strong>Evidence is role protected</strong><p>Administrators and auditors can verify the complete integrity chain.</p></div></section>
+  return <section className="page-view"><div className="page-title split"><div><span className="kicker">ACCOUNTABILITY</span><h1>Evidence ledger</h1><p>Operational inputs, guidance, and decisions share one tamper-evident history.</p></div>{query.data&&<div className={query.data.valid?'chain-health':'chain-health alert'}><ShieldCheck/>{query.data.valid?'Chain intact':`Broken at ${query.data.broken_at}`}</div>}</div><div className="ledger">{query.data?.events.map(event=><article key={String(event.sequence)}><b>#{String(event.sequence).padStart(3,'0')}</b><div><strong>{String(event.event_type)}</strong><p>{new Date(String(event.created_at)).toLocaleString()} · actor {String(event.actor_id??'system')}</p></div><code>{String(event.event_hash).slice(0,16)}…</code></article>)}</div></section>
 }
 
-function Approvals({ data, token }: { data: DashboardData; token: string }) {
+function SettingsView({ token, context }: { token:string; context:OrganizationContext }) {
+  const client=useQueryClient(); const [form,setForm]=useState({...context,objectives:context.objectives.join('\n'),constraints:context.constraints.join('\n')}); const [drillResult,setDrillResult]=useState(''); const mutation=useMutation({mutationFn:()=>updateOrganization(token,{name:form.name,industry:form.industry,description:form.description,objectives:form.objectives.split('\n').filter(Boolean),constraints:form.constraints.split('\n').filter(Boolean)}),onSuccess:()=>client.invalidateQueries({queryKey:['supply-chain']})}); const userMutation=useMutation({mutationFn:()=>updateUserContext(token,{owned_stages:['all'],timezone_name:Intl.DateTimeFormat().resolvedOptions().timeZone})}); const drill=useMutation({mutationFn:(type:string)=>runAttack(token,type),onSuccess:result=>setDrillResult(result.message)})
+  return <section className="page-view settings-view"><div className="page-title"><span className="kicker">GROUND THE MODEL</span><h1>Business context</h1><p>AI guidance uses this governed profile. It never treats free text as permission to act.</p></div><form onSubmit={e=>{e.preventDefault();mutation.mutate()}}><div className="field-pair"><label>Organization<input value={form.name} onChange={e=>setForm({...form,name:e.target.value})}/></label><label>Industry<input value={form.industry} onChange={e=>setForm({...form,industry:e.target.value})}/></label></div><label>How the business operates<textarea value={form.description} onChange={e=>setForm({...form,description:e.target.value})}/></label><div className="field-pair"><label>Objectives, one per line<textarea value={form.objectives} onChange={e=>setForm({...form,objectives:e.target.value})}/></label><label>Constraints, one per line<textarea value={form.constraints} onChange={e=>setForm({...form,constraints:e.target.value})}/></label></div><button className="solid">Save governed context</button></form><button className="quiet-link" onClick={()=>userMutation.mutate()}>Confirm my role context and timezone</button><section className="integrity-drill"><span className="kicker">ADMIN-ONLY INTEGRITY DRILL</span><h2>Test the monitored chain</h2><p>Inject a synthetic exception. It is quarantined and recorded without altering trusted operational data.</p><div>{[['demand_poisoning','Demand poisoning'],['inventory_manipulation','Stock manipulation'],['supplier_spoofing','Supplier spoofing']].map(([id,label])=><button key={id} onClick={()=>drill.mutate(id)}>{label}</button>)}</div>{drillResult&&<div className="notice">{drillResult}</div>}</section></section>
+}
+
+function HandoffsPanel({ token, chainId, graph, onMutated }: { token:string; chainId:number; graph:{nodes:Array<{id:number;name:string}>;edges:Array<{id:number;source:number;target:number;label:string}>}; onMutated:()=>void }) {
+  const client=useQueryClient()
+  const remove = useMutation({mutationFn:(id:number)=>deleteEdge(token,id),onSuccess:()=>{client.invalidateQueries({queryKey:['supply-chain']});onMutated()}})
+  const rename = useMutation({mutationFn:({id,label}:{id:number;label:string})=>updateEdge(token,id,{label}),onSuccess:()=>{client.invalidateQueries({queryKey:['supply-chain']});onMutated()}})
+  const name = (id:number)=>graph.nodes.find(node=>node.id===id)?.name ?? `#${id}`
+  return <div className="handoffs-panel"><div className="section-label"><GitBranch/>HANDOFFS <span>{graph.edges.length} connections</span></div>{graph.edges.length? <div className="handoffs-list">{graph.edges.map(edge=><article key={edge.id}><span>{name(edge.source)} <ArrowRight/> {name(edge.target)}</span><input defaultValue={edge.label} aria-label={`Label for ${name(edge.source)} to ${name(edge.target)}`} onBlur={event=>{const label=event.target.value.trim();if(label!==edge.label)rename.mutate({id:edge.id,label})}}/><button aria-label="Delete handoff" onClick={()=>remove.mutate(edge.id)}><Trash2/></button></article>)}</div> : <div className="empty-state"><GitBranch/><strong>No handoffs yet</strong><p>Use connect mode to link two stages.</p></div>}</div>
+}
+
+function ChainsView({ token, canManage, activeChainId, onOpen }: { token:string; canManage:boolean; activeChainId:number|null; onOpen:(id:number)=>void }) {
   const client = useQueryClient()
-  const mutation = useMutation({ mutationFn: ({ id, decision }: { id: number; decision: 'approved' | 'rejected' }) => decideRecommendation(token, id, decision), onSuccess: () => client.invalidateQueries({ queryKey: ['dashboard'] }) })
-  return <><div className="page-heading"><div><p className="eyebrow">HUMAN IN THE LOOP</p><h1>Purchase approvals</h1><p>Recommendations explain their inputs and never create a real order automatically.</p></div></div><div className="approval-list">{data.recommendations.length ? data.recommendations.map((item) => <article className="approval-card" key={item.id}><div><span className={`health ${item.status}`}>{item.status}</span><h2>{item.product_name} <small>{item.sku}</small></h2><p>Order <strong>{item.recommended_quantity} units</strong> based on a {item.reorder_point.toFixed(0)} reorder point, {item.safety_stock.toFixed(0)} safety stock, EOQ {item.eoq.toFixed(0)}, and supplier risk {item.supplier_risk}/100.</p></div>{item.status === 'pending' && <div className="approval-actions"><button className="reject" onClick={() => mutation.mutate({ id: item.id, decision: 'rejected' })}><X size={16}/> Reject</button><button className="approve" onClick={() => mutation.mutate({ id: item.id, decision: 'approved' })}><Check size={16}/> Approve simulation</button></div>}</article>) : <div className="empty panel">Generate a recommendation from the overview first.</div>}</div></>
+  const query = useQuery({queryKey:['supply-chains'],queryFn:()=>listSupplyChains(token)})
+  const [creating, setCreating] = useState(false)
+  const [form, setForm] = useState({key:'',name:'',description:''})
+  const [editingId, setEditingId] = useState<number|null>(null)
+  const [editForm, setEditForm] = useState({name:'',description:''})
+  const invalidate = ()=>{client.invalidateQueries({queryKey:['supply-chains']});client.invalidateQueries({queryKey:['supply-chain']})}
+  const create = useMutation({mutationFn:()=>createSupplyChain(token,{key:form.key,name:form.name,description:form.description}),onSuccess:chain=>{setCreating(false);setForm({key:'',name:'',description:''});invalidate();onOpen(chain.id)}})
+  const update = useMutation({mutationFn:(id:number)=>updateSupplyChain(token,id,{name:editForm.name,description:editForm.description}),onSuccess:()=>{setEditingId(null);invalidate()}})
+  const archive = useMutation({mutationFn:(id:number)=>archiveSupplyChain(token,id),onSuccess:invalidate})
+  const restore = useMutation({mutationFn:(id:number)=>restoreSupplyChain(token,id),onSuccess:invalidate})
+  if(!canManage) return <section className="page-view"><div className="empty-state"><Layers/><strong>Chain building is role protected</strong><p>Administrators create and modify supply chains and their stages.</p></div></section>
+  return <section className="page-view chains-view"><div className="page-title split"><div><span className="kicker">BUILD THE MODEL</span><h1>Supply chains</h1><p>Create a chain, then add individual stages and handoffs from the control tower.</p></div><button className="solid" onClick={()=>setCreating(current=>!current)}><Plus/>{creating?'Cancel':'New supply chain'}</button></div>{creating&&<form className="chain-form" onSubmit={event=>{event.preventDefault();create.mutate()}}><div className="field-pair"><label>Key<input value={form.key} onChange={event=>setForm({...form,key:event.target.value})} required pattern="[a-z0-9][a-z0-9-]*" placeholder="east-assembly"/><small>Lowercase identifier, unique.</small></label><label>Name<input value={form.name} onChange={event=>setForm({...form,name:event.target.value})} required placeholder="East assembly line"/></label></div><label>Description<textarea value={form.description} onChange={event=>setForm({...form,description:event.target.value})} placeholder="What this chain covers."/></label>{create.error&&<div className="notice danger">{create.error.message}</div>}<button className="solid" disabled={create.isPending}>Create chain</button></form>}<div className="chain-list">{query.data?.chains.length?query.data.chains.map(chain=><article key={chain.id} className={chain.status==='archived'?'archived':''}><div><span className="kicker">{chain.key}</span><h3>{chain.name}</h3><p>{chain.description||'No description yet.'}</p></div><div className="chain-facts"><span><b>{chain.node_count}</b> stages</span><span className={chain.worst_status==='healthy'||chain.worst_status==='empty'?'':'has-risk'}><b>{chain.worst_status}</b> state</span><span><b>{chain.pending_actions}</b> actions</span></div><div className="chain-actions">{editingId===chain.id?<form onSubmit={event=>{event.preventDefault();update.mutate(chain.id)}}><input value={editForm.name} onChange={event=>setEditForm({...editForm,name:event.target.value})} aria-label="Chain name" required/><textarea value={editForm.description} onChange={event=>setEditForm({...editForm,description:event.target.value})} aria-label="Chain description"/><button className="solid" type="submit">Save</button><button type="button" className="quiet-link" onClick={()=>setEditingId(null)}>Cancel</button></form>:<><button onClick={()=>onOpen(chain.id)} disabled={chain.status==='archived'||chain.id===activeChainId}>{chain.id===activeChainId?'Open in tower':'Open'}</button><button onClick={()=>{setEditingId(chain.id);setEditForm({name:chain.name,description:chain.description})}}><Pencil/>Edit</button>{chain.status==='archived'?<button onClick={()=>restore.mutate(chain.id)}>Restore</button>:<button onClick={()=>archive.mutate(chain.id)}>Archive</button>}</>}</div></article>):<div className="empty-state"><Layers/><strong>No supply chains</strong><p>Create the first chain to start building stages.</p></div>}</div></section>
 }
 
-function Audit({ token }: { token: string }) {
-  const query = useQuery({ queryKey: ['audit'], queryFn: () => getAudit(token) })
-  return <><div className="page-heading"><div><p className="eyebrow">ACCOUNTABILITY</p><h1>Tamper-evident audit chain</h1><p>Each event includes the previous event hash; any edit breaks verification.</p></div>{query.data && <span className={query.data.valid ? 'verified-pill' : 'danger-pill'}>{query.data.valid ? <ShieldCheck size={15}/> : <ShieldX size={15}/>} {query.data.valid ? 'Chain intact' : `Broken at #${query.data.broken_at}`}</span>}</div><article className="panel audit-panel">{query.error && <div className="error-banner">{query.error.message}</div>}{query.data?.events.map((event) => <div className="audit-row" key={String(event.sequence)}><span className="audit-sequence">#{String(event.sequence).padStart(3, '0')}</span><div><strong>{String(event.event_type)}</strong><p>{new Date(String(event.created_at)).toLocaleString()} · actor {String(event.actor_id ?? 'system')}</p><code>{String(event.event_hash).slice(0, 20)}…</code></div></div>)}</article></>
+function Workspace({ session, onLogout, theme, onToggleTheme }: { session:Session; onLogout:()=>void; theme:Theme; onToggleTheme:()=>void }) {
+  const [view,setView]=useState<View>('control'); const [selectedId,setSelectedId]=useState<number|null>(null); const [mobileNav,setMobileNav]=useState(false); const [search,setSearch]=useState(''); const [searchOpen,setSearchOpen]=useState(false); const searchRef=useRef<HTMLInputElement>(null)
+  const [activeChainId,setActiveChainId]=useState<number|null>(()=>{const saved=Number(sessionStorage.getItem('sentinel-chain'));return Number.isFinite(saved)&&saved>0?saved:null})
+  const [nodeEditor,setNodeEditor]=useState<{mode:'create'}|{mode:'edit';node:SupplyChainNode}|null>(null)
+  const [connectFrom,setConnectFrom]=useState<number|null>(null)
+  const [showHandoffs,setShowHandoffs]=useState(false)
+  const [builderError,setBuilderError]=useState('')
+  const client=useQueryClient()
+  const permissionsQuery=useQuery({queryKey:['permissions'],queryFn:()=>getPermissions(session.token),staleTime:300_000})
+  const chainsQuery=useQuery({queryKey:['supply-chains'],queryFn:()=>listSupplyChains(session.token),staleTime:60_000})
+  const query=useQuery({queryKey:['supply-chain',activeChainId??'default'],queryFn:()=>activeChainId===null?getSupplyChain(session.token):getChainGraph(session.token,activeChainId),refetchInterval:60_000})
+  const selected=query.data?.nodes.find(node=>node.id===selectedId)??null
+  const perms=permissionsQuery.data?.permissions??[]
+  const canOperate=perms.includes('evidence.submit'); const canDecide=perms.includes('action.decide'); const canAudit=perms.includes('audit.read'); const canManage=perms.includes('chain.manage'); const canVerify=perms.includes('node.verify'); const canEscalate=perms.includes('action.escalate')
+  useEffect(()=>{const list=chainsQuery.data;if(!list||activeChainId!==null)return;const chosen=list.chains.find(chain=>chain.id===list.default_chain_id&&chain.status==='active')??list.chains.find(chain=>chain.status==='active');if(chosen){setActiveChainId(chosen.id);sessionStorage.setItem('sentinel-chain',String(chosen.id))}},[chainsQuery.data,activeChainId])
+  const switchChain=(id:number)=>{setActiveChainId(id);sessionStorage.setItem('sentinel-chain',String(id));setSelectedId(null);setConnectFrom(null);setShowHandoffs(false)}
+  const nav:Array<[View,string,typeof Activity]>=[['control','Control tower',GitBranch],['actions','Action queue',Activity],['evidence','Evidence',FileClock]]; if(canManage){nav.push(['chains','Supply chains',Layers]);nav.push(['settings','Settings',Settings])}
+  const counts=useMemo(()=>({risk:query.data?.nodes.filter(n=>n.status!=='healthy').length??0,actions:query.data?.nodes.reduce((n,item)=>n+(item.pending_actions??0),0)??0}),[query.data])
+  const searchResults=useMemo(()=>{const term=search.trim().toLowerCase();if(!term)return[];return(query.data?.nodes??[]).filter(node=>[node.name,node.key,node.stage_type,node.owner_role,node.status].some(value=>value.toLowerCase().includes(term))).slice(0,8)},[query.data,search])
+  useEffect(()=>{const onKeyDown=(event:KeyboardEvent)=>{if((event.metaKey||event.ctrlKey)&&event.key.toLowerCase()==='k'){event.preventDefault();setSearchOpen(true);searchRef.current?.focus()}if(event.key==='Escape'){setSearchOpen(false);setConnectFrom(null);searchRef.current?.blur()}};window.addEventListener('keydown',onKeyDown);return()=>window.removeEventListener('keydown',onKeyDown)},[])
+  const chooseSearchResult=(id:number)=>{setView('control');setSelectedId(id);setSearch('');setSearchOpen(false)}
+  const invalidateGraph=()=>{client.invalidateQueries({queryKey:['supply-chain']});client.invalidateQueries({queryKey:['supply-chains']})}
+  const addEdge = useMutation({mutationFn:({source,target}:{source:number;target:number})=>createEdge(session.token,activeChainId as number,{source_node_id:source,target_node_id:target,label:'handoff'}),onSuccess:()=>{setConnectFrom(null);setBuilderError('');invalidateGraph()},onError:error=>setBuilderError(error.message)})
+  const reconnectEdge = useMutation({mutationFn:({id,source,target}:{id:number;source:number;target:number})=>updateEdge(session.token,id,{source_node_id:source,target_node_id:target}),onSuccess:()=>invalidateGraph(),onError:error=>{setBuilderError(error.message);invalidateGraph()}})
+  const removeEdges = useMutation({mutationFn:(ids:number[])=>Promise.all(ids.map(id=>deleteEdge(session.token,id))),onSuccess:()=>invalidateGraph(),onError:error=>{setBuilderError(error.message);invalidateGraph()}})
+  const position = useMutation({mutationFn:({id,x,y}:{id:number;x:number;y:number})=>updateNode(session.token,id,{position_x:x,position_y:y}),onSuccess:()=>client.invalidateQueries({queryKey:['supply-chain']},{cancelRefetch:false})})
+  const handleNodeSelect=(id:number)=>{if(connectFrom!==null){if(connectFrom===-1){setConnectFrom(id);return}if(connectFrom===id){setConnectFrom(null);return}if(activeChainId!==null){setBuilderError('');addEdge.mutate({source:connectFrom,target:id})}return}setSelectedId(id)}
+  return <div className="workspace-shell"><header className="topbar"><button className="mobile-menu" onClick={()=>setMobileNav(!mobileNav)}><Menu/></button><div className="wordmark"><ShieldCheck/> SENTINELCHAIN</div><div className={`command ${searchOpen?'open':''}`}><Search/><input ref={searchRef} value={search} onChange={event=>{setSearch(event.target.value);setSearchOpen(true)}} onFocus={()=>setSearchOpen(true)} placeholder="Search stages by name, owner, status" aria-label="Search supply-chain stages"/><kbd>⌘ K</kbd>{searchOpen&&search.trim()&&<div className="command-results">{searchResults.length?searchResults.map(node=><button key={node.id} onMouseDown={event=>{event.preventDefault();chooseSearchResult(node.id)}}><span><strong>{node.name}</strong><small>{node.stage_type} · {roleLabel[node.owner_role]??node.owner_role}</small></span><i className={`state-${node.status}`}>{node.status.replace('_',' ')}</i></button>):<div className="command-empty">No matching stages</div>}</div>}</div><div className="live-state"><i/>MONITORING LIVE</div><ThemeToggle theme={theme} onToggle={onToggleTheme}/><div className="identity"><div><strong>{session.user.display_name}</strong><span>{roleLabel[session.user.role]}</span></div><button onClick={onLogout} aria-label="Log out"><LogOut/></button></div></header><nav className={mobileNav?'rail open':'rail'}>{nav.map(([id,label,Icon])=><button key={id} className={view===id?'active':''} onClick={()=>{setView(id);setMobileNav(false)}}><Icon/><span>{label}</span>{id==='actions'&&counts.actions>0&&<b>{counts.actions}</b>}</button>)}</nav><main className="main-stage">{query.error&&<div className="notice danger">{query.error.message}</div>}{permissionsQuery.error&&<div className="notice danger">{permissionsQuery.error.message}</div>}{view==='control'&&<><div className="control-header"><div><span className="kicker">{query.data?.organization.industry??'LOADING OPERATING MODEL'}</span><h1>{query.data?.organization.name??'Supply-chain control tower'}</h1><p>Every handoff monitored. Every recommendation tied to evidence.</p></div><div className="control-tools"><label className="chain-switcher"><span>Supply chain</span><select value={activeChainId??''} onChange={event=>switchChain(Number(event.target.value))} aria-label="Switch supply chain">{chainsQuery.data?.chains.map(chain=><option key={chain.id} value={chain.id} disabled={chain.status==='archived'}>{chain.name} · {chain.node_count} stages{chain.status==='archived'?' · archived':''}</option>)??<option value="">Loading…</option>}</select></label><div className="control-metrics"><span><b>{query.data?.nodes.length??0}</b> stages</span><span className={counts.risk?'has-risk':''}><b>{counts.risk}</b> exceptions</span><span><b>{counts.actions}</b> actions</span></div></div></div>{canManage&&activeChainId!==null&&<div className="builder-bar"><button className={nodeEditor?.mode==='create'?'active':''} onClick={()=>setNodeEditor(nodeEditor?null:{mode:'create'})}><Plus/>Add stage</button><button className={connectFrom!==null?'active':''} onClick={()=>{setBuilderError('');setConnectFrom(connectFrom!==null?null:-1)}}><Link2/>{connectFrom===-1?'Select first stage…':connectFrom!==null?'Select target stage…':'Connect stages'}</button><button className={showHandoffs?'active':''} onClick={()=>setShowHandoffs(!showHandoffs)}><GitBranch/>Handoffs</button><span className="builder-hint">Drag the dot between two stages to draw a handoff · drag an arrow's end to reroute it · select an arrow and press Delete to remove it</span></div>}{connectFrom===-1&&<div className="notice">Pick the first stage to connect, then the target. Press Escape to cancel.</div>}{connectFrom!==null&&connectFrom!==-1&&<div className="notice">Now pick the target stage for this handoff.</div>}{builderError&&<div className="notice danger">{builderError}</div>}{nodeEditor&&activeChainId!==null&&<NodeEditor token={session.token} chainId={activeChainId} node={nodeEditor.mode==='edit'?nodeEditor.node:null} onClose={()=>setNodeEditor(null)} onSaved={()=>invalidateGraph()}/>}{showHandoffs&&query.data&&activeChainId!==null&&<HandoffsPanel token={session.token} chainId={activeChainId} graph={{nodes:query.data.nodes,edges:query.data.edges}} onMutated={()=>client.invalidateQueries({queryKey:['supply-chain']})}/>}{query.isLoading?<div className="graph-loading">Building the operating model…</div>:query.data&&query.data.nodes.length===0?<div className="empty-state graph-empty"><Layers/><strong>No stages in this chain</strong><p>{canManage?'Use “Add stage” to create the first node of this supply chain.':'An administrator has not added stages to this chain yet.'}</p></div>:query.data&&<><div className="desktop-topology"><Topology key={activeChainId??'none'} items={query.data.nodes} edges={query.data.edges} selectedId={selectedId} onSelect={handleNodeSelect} editable={canManage&&connectFrom===null} onReposition={(id,pos)=>position.mutate({id,x:Math.round(pos.x),y:Math.round(pos.y)})} onConnectEdge={(source,target)=>{setBuilderError('');addEdge.mutate({source,target})}} onReconnectEdge={(id,source,target)=>{setBuilderError('');reconnectEdge.mutate({id,source,target})}} onDeleteEdges={ids=>removeEdges.mutate(ids)} theme={theme}/></div><div className="mobile-stage-list">{query.data.nodes.map((node,index)=><button key={node.id} onClick={()=>setSelectedId(node.id)}><span>{String(index+1).padStart(2,'0')}</span><div><small>{node.stage_type}</small><strong>{node.name}</strong></div><i className={`state-${node.status}`}/></button>)}</div></>}<footer className="signal-strip"><span><CircleDot/>Inputs: authenticated API + manual evidence</span><span><Bot/>Guidance: Foundry-grounded, human-approved</span><span><Clock3/>Last refresh: {query.data?new Date(query.data.updated_at).toLocaleTimeString():'—'}</span></footer></>}{view==='actions'&&<ActionQueue token={session.token} canDecide={canDecide} canEscalate={canEscalate}/>} {view==='evidence'&&<EvidenceView token={session.token} canAudit={canAudit}/>} {view==='chains'&&<ChainsView token={session.token} canManage={canManage} activeChainId={activeChainId} onOpen={id=>{switchChain(id);setView('control')}}/>} {view==='settings'&&query.data&&<SettingsView token={session.token} context={query.data.organization}/>} </main>{selected&&<Inspector token={session.token} node={selected} canOperate={canOperate} canDecide={canDecide} canEscalate={canEscalate} canVerify={canVerify} canManage={canManage} onClose={()=>setSelectedId(null)} onEdit={()=>{setNodeEditor({mode:'edit',node:selected});setView('control')}}/>}</div>
 }
 
-function Shell({ session, onLogout }: { session: Session; onLogout: () => void }) {
-  const [view, setView] = useState<View>('overview')
-  const query = useQuery({ queryKey: ['dashboard'], queryFn: () => getDashboard(session.token) })
-  const alerts = useQuery({ queryKey: ['alerts'], queryFn: () => getAlerts(session.token), enabled: view === 'security' })
-  const nav: Array<[View, string, typeof Activity]> = [['overview', 'Overview', Activity], ['suppliers', 'Suppliers', Truck], ['security', 'Security lab', ShieldCheck], ['approvals', 'Approvals', PackageCheck], ['audit', 'Audit trail', FileClock]]
-  return <div className="app-shell"><aside><div className="brand-mark"><ShieldCheck size={23}/><span>SentinelChain <b>AI</b></span></div><nav>{nav.map(([id, label, Icon]) => <button key={id} className={view === id ? 'active' : ''} onClick={() => setView(id)}><Icon size={18}/><span>{label}</span>{id === 'approvals' && query.data?.kpis.pending_approvals ? <em>{query.data.kpis.pending_approvals}</em> : null}</button>)}</nav><div className="sidebar-footer"><div className="user-avatar">{session.user.display_name.split(' ').map((part) => part[0]).join('').slice(0,2)}</div><div><strong>{session.user.display_name}</strong><small>{roleLabel[session.user.role] ?? session.user.role}</small></div><button aria-label="Log out" onClick={onLogout}><LogOut size={17}/></button></div></aside><main className="workspace">{query.isLoading && <div className="loading"><div className="spinner"/>Loading verified data…</div>}{query.error && <div className="error-banner">{query.error.message}</div>}{query.data && view === 'overview' && <Overview data={query.data} token={session.token}/>} {view === 'suppliers' && <Suppliers token={session.token}/>} {view === 'security' && <><SecurityLab token={session.token}/>{alerts.data && <div className="lab-footnote">{alerts.data.length} total alert records preserved.</div>}</>} {query.data && view === 'approvals' && <Approvals data={query.data} token={session.token}/>} {view === 'audit' && <Audit token={session.token}/>}</main></div>
-}
-
-export default function App() {
-  const saved = sessionStorage.getItem('sentinel-session')
-  const [session, setSession] = useState<Session | null>(() => saved ? JSON.parse(saved) : null)
-  function handleLogin(next: Session) { sessionStorage.setItem('sentinel-session', JSON.stringify(next)); setSession(next) }
-  function logout() { sessionStorage.removeItem('sentinel-session'); setSession(null) }
-  return session ? <Shell session={session} onLogout={logout}/> : <Login onLogin={handleLogin}/>
-}
-
+export default function App(){ const saved=sessionStorage.getItem('sentinel-session'); const [session,setSession]=useState<Session|null>(()=>saved?JSON.parse(saved):null); const [theme,setTheme]=useState<Theme>(()=>localStorage.getItem('sentinel-theme')==='light'?'light':'dark'); useEffect(()=>{document.documentElement.dataset.theme=theme;document.documentElement.style.colorScheme=theme;localStorage.setItem('sentinel-theme',theme)},[theme]); const toggleTheme=()=>setTheme(current=>current==='dark'?'light':'dark'); return session?<Workspace session={session} theme={theme} onToggleTheme={toggleTheme} onLogout={()=>{sessionStorage.removeItem('sentinel-session');sessionStorage.removeItem('sentinel-chain');setSession(null)}}/>:<Login theme={theme} onToggleTheme={toggleTheme} onLogin={next=>{sessionStorage.setItem('sentinel-session',JSON.stringify(next));setSession(next)}}/> }

@@ -72,6 +72,56 @@ def require_roles(*roles: Role):
     return dependency
 
 
+# Role capability matrix: the single source of truth for what each role may do.
+# Route guards use require_roles(); clients consume this via GET /auth/permissions.
+ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
+    Role.ADMIN.value: frozenset(
+        {
+            "chain.manage",
+            "node.manage",
+            "edge.manage",
+            "evidence.submit",
+            "guidance.refresh",
+            "forecast.manage",
+            "recommendation.generate",
+            "action.decide",
+            "action.escalate",
+            "node.verify",
+            "audit.read",
+            "org.manage",
+            "demo.attack",
+        }
+    ),
+    Role.ANALYST.value: frozenset(
+        {
+            "evidence.submit",
+            "guidance.refresh",
+            "forecast.manage",
+            "recommendation.generate",
+        }
+    ),
+    Role.MANAGER.value: frozenset(
+        {
+            "evidence.submit",
+            "guidance.refresh",
+            "action.decide",
+            "action.escalate",
+        }
+    ),
+    Role.AUDITOR.value: frozenset(
+        {
+            "guidance.refresh",
+            "node.verify",
+            "audit.read",
+        }
+    ),
+}
+
+
+def permissions_for(role: str) -> list[str]:
+    return sorted(ROLE_PERMISSIONS.get(role, frozenset()))
+
+
 def sign_import(content: bytes) -> str:
     return hmac.new(settings.import_hmac_secret.encode(), content, hashlib.sha256).hexdigest()
 
