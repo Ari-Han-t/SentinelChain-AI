@@ -155,6 +155,8 @@ export type NodeInput = {
   metadata?: Record<string, unknown>
 }
 
+export type OperatingRecord = Record<string, unknown> & { id: number }
+
 async function request<T>(path: string, token?: string, options: RequestInit = {}): Promise<T> {
   const response = await fetch(`${API_URL}${path}`, {
     ...options,
@@ -222,6 +224,46 @@ export function getSupplyChain(token: string) {
 
 export function getPermissions(token: string) {
   return request<Permissions>('/auth/permissions', token)
+}
+
+export function getNodeTemplates(token: string) {
+  return request<OperatingRecord[]>('/node-templates', token)
+}
+
+export function getWorkflows(token: string) {
+  return request<OperatingRecord[]>('/workflows', token)
+}
+
+export function getOperationalTasks(token: string) {
+  return request<OperatingRecord[]>('/operational-tasks', token)
+}
+
+export function updateOperationalTask(token: string, id: number, input: Record<string, unknown>) {
+  return request<OperatingRecord>(`/operational-tasks/${id}`, token, { method: 'PATCH', body: JSON.stringify(input) })
+}
+
+export function getInventoryLots(token: string) {
+  return request<OperatingRecord[]>('/inventory/lots', token)
+}
+
+export function getPurchaseOrders(token: string) {
+  return request<OperatingRecord[]>('/purchase-orders', token)
+}
+
+export function getShipments(token: string) {
+  return request<OperatingRecord[]>('/shipments', token)
+}
+
+export function getQualityInspections(token: string) {
+  return request<OperatingRecord[]>('/quality/inspections', token)
+}
+
+export function getRisks(token: string) {
+  return request<OperatingRecord[]>('/risks', token)
+}
+
+export function getControlTowerExceptions(token: string) {
+  return request<OperatingRecord[]>('/control-tower/exceptions', token)
 }
 
 export function listSupplyChains(token: string) {

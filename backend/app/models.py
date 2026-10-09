@@ -183,6 +183,168 @@ class UserContext(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
+# Reusable universal-SCM operating layer.  JSON is deliberately stored as text:
+# it keeps the model portable across SQLite (tests) and PostgreSQL deployments.
+class NodeTemplate(Base):
+    __tablename__ = "node_templates"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(160))
+    key: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    description: Mapped[str] = mapped_column(Text, default="")
+    field_definitions_json: Mapped[str] = mapped_column(Text, default="[]")
+    enabled_modules_json: Mapped[str] = mapped_column(Text, default="[]")
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class Workflow(Base):
+    __tablename__ = "workflows"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(160))
+    trigger_json: Mapped[str] = mapped_column(Text, default="{}")
+    conditions_json: Mapped[str] = mapped_column(Text, default="[]")
+    actions_json: Mapped[str] = mapped_column(Text, default="[]")
+    status: Mapped[str] = mapped_column(String(30), default="draft", index=True)
+    created_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class WorkflowExecution(Base):
+    __tablename__ = "workflow_executions"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    workflow_id: Mapped[int] = mapped_column(ForeignKey("workflows.id"), index=True)
+    status: Mapped[str] = mapped_column(String(30), default="queued", index=True)
+    input_json: Mapped[str] = mapped_column(Text, default="{}")
+    output_json: Mapped[str] = mapped_column(Text, default="{}")
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
+
+
+class OperationalTask(Base):
+    __tablename__ = "operational_tasks"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    title: Mapped[str] = mapped_column(String(200))
+    description: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(30), default="open", index=True)
+    priority: Mapped[str] = mapped_column(String(20), default="normal")
+    assigned_to: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class InventoryLot(Base):
+    __tablename__ = "inventory_lots"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    sku: Mapped[str] = mapped_column(String(64), index=True)
+    lot_number: Mapped[str] = mapped_column(String(100), index=True)
+    quantity: Mapped[float] = mapped_column(Float, default=0)
+    location: Mapped[str] = mapped_column(String(160), default="")
+    status: Mapped[str] = mapped_column(String(30), default="available", index=True)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class StockMovement(Base):
+    __tablename__ = "stock_movements"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    lot_id: Mapped[int] = mapped_column(ForeignKey("inventory_lots.id"), index=True)
+    movement_type: Mapped[str] = mapped_column(String(30))
+    quantity: Mapped[float] = mapped_column(Float)
+    reason: Mapped[str] = mapped_column(String(300), default="")
+    created_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class PurchaseOrder(Base):
+    __tablename__ = "purchase_orders"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    order_number: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    supplier_id: Mapped[int | None] = mapped_column(ForeignKey("suppliers.id"), nullable=True)
+    status: Mapped[str] = mapped_column(String(30), default="draft", index=True)
+    ordered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
+
+
+class PurchaseOrderLine(Base):
+    __tablename__ = "purchase_order_lines"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    purchase_order_id: Mapped[int] = mapped_column(ForeignKey("purchase_orders.id"), index=True)
+    sku: Mapped[str] = mapped_column(String(64))
+    quantity: Mapped[float] = mapped_column(Float)
+    unit_cost: Mapped[float] = mapped_column(Float)
+
+
+class Shipment(Base):
+    __tablename__ = "shipments"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    shipment_number: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    purchase_order_id: Mapped[int | None] = mapped_column(ForeignKey("purchase_orders.id"), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(30), default="planned", index=True)
+    carrier: Mapped[str] = mapped_column(String(120), default="")
+    tracking_number: Mapped[str] = mapped_column(String(160), default="")
+    created_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
+
+
+class TrackingEvent(Base):
+    __tablename__ = "tracking_events"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    shipment_id: Mapped[int] = mapped_column(ForeignKey("shipments.id"), index=True)
+    status: Mapped[str] = mapped_column(String(40))
+    location: Mapped[str] = mapped_column(String(160), default="")
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    notes: Mapped[str] = mapped_column(Text, default="")
+
+
+class QualityInspection(Base):
+    __tablename__ = "quality_inspections"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    lot_id: Mapped[int] = mapped_column(ForeignKey("inventory_lots.id"), index=True)
+    result: Mapped[str] = mapped_column(String(30), default="pending", index=True)
+    quarantine_reason: Mapped[str] = mapped_column(Text, default="")
+    disposition: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    inspected_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    inspected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class Risk(Base):
+    __tablename__ = "risks"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    title: Mapped[str] = mapped_column(String(200))
+    description: Mapped[str] = mapped_column(Text, default="")
+    likelihood: Mapped[int] = mapped_column(Integer)
+    impact: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(30), default="open", index=True)
+    owner_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    created_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class Document(Base):
+    __tablename__ = "documents"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(200))
+    document_type: Mapped[str] = mapped_column(String(60))
+    content_digest: Mapped[str] = mapped_column(String(64))
+    metadata_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ControlTowerException(Base):
+    __tablename__ = "control_tower_exceptions"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    title: Mapped[str] = mapped_column(String(200))
+    severity: Mapped[str] = mapped_column(String(20), default="medium")
+    category: Mapped[str] = mapped_column(String(60), default="operational")
+    status: Mapped[str] = mapped_column(String(30), default="open", index=True)
+    details: Mapped[str] = mapped_column(Text, default="")
+    assigned_to: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    created_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class SupplyChain(Base):
     __tablename__ = "supply_chains"
 

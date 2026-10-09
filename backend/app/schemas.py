@@ -116,3 +116,90 @@ class EdgeUpdateRequest(BaseModel):
     label: Optional[str] = Field(default=None, max_length=120)
     source_node_id: Optional[int] = None
     target_node_id: Optional[int] = None
+
+
+class NodeTemplateRequest(BaseModel):
+    name: str = Field(min_length=2, max_length=160)
+    key: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{1,78}[a-z0-9]$", min_length=3, max_length=80)
+    description: str = Field(default="", max_length=4000)
+    field_definitions: list[dict[str, Any]] = Field(default_factory=list, max_length=100)
+    enabled_modules: list[str] = Field(default_factory=list, max_length=50)
+
+
+class WorkflowRequest(BaseModel):
+    name: str = Field(min_length=2, max_length=160)
+    trigger: dict[str, Any] = Field(default_factory=dict)
+    conditions: list[dict[str, Any]] = Field(default_factory=list, max_length=100)
+    actions: list[dict[str, Any]] = Field(default_factory=list, max_length=100)
+    status: Literal["draft", "active", "disabled"] = "draft"
+
+
+class TaskRequest(BaseModel):
+    title: str = Field(min_length=2, max_length=200)
+    description: str = Field(default="", max_length=4000)
+    priority: Literal["low", "normal", "high", "critical"] = "normal"
+    assigned_to: int | None = None
+
+
+class InventoryLotRequest(BaseModel):
+    sku: str = Field(min_length=1, max_length=64)
+    lot_number: str = Field(min_length=1, max_length=100)
+    quantity: float = Field(ge=0)
+    location: str = Field(default="", max_length=160)
+
+
+class StockMovementRequest(BaseModel):
+    lot_id: int
+    movement_type: Literal["receipt", "issue", "adjustment", "transfer"]
+    quantity: float = Field(gt=0)
+    reason: str = Field(default="", max_length=300)
+
+
+class PurchaseOrderRequest(BaseModel):
+    order_number: str = Field(min_length=1, max_length=80)
+    supplier_id: int | None = None
+    status: Literal["draft", "submitted", "approved", "closed", "cancelled"] = "draft"
+    lines: list[dict[str, Any]] = Field(default_factory=list, max_length=100)
+
+
+class ShipmentRequest(BaseModel):
+    shipment_number: str = Field(min_length=1, max_length=80)
+    purchase_order_id: int | None = None
+    carrier: str = Field(default="", max_length=120)
+    tracking_number: str = Field(default="", max_length=160)
+
+
+class TrackingEventRequest(BaseModel):
+    status: str = Field(min_length=2, max_length=40)
+    location: str = Field(default="", max_length=160)
+    notes: str = Field(default="", max_length=1000)
+
+
+class QualityInspectionRequest(BaseModel):
+    lot_id: int
+    result: Literal["pass", "fail", "pending"]
+    quarantine_reason: str = Field(default="", max_length=2000)
+    disposition: Literal["release", "scrap", "return", "rework"] | None = None
+
+
+class RiskRequest(BaseModel):
+    title: str = Field(min_length=2, max_length=200)
+    description: str = Field(default="", max_length=4000)
+    likelihood: int = Field(ge=1, le=5)
+    impact: int = Field(ge=1, le=5)
+    owner_id: int | None = None
+
+
+class DocumentRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    document_type: str = Field(min_length=1, max_length=60)
+    content_digest: str = Field(pattern=r"^[0-9a-fA-F]{64}$")
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ExceptionRequest(BaseModel):
+    title: str = Field(min_length=2, max_length=200)
+    severity: Literal["low", "medium", "high", "critical"] = "medium"
+    category: str = Field(default="operational", max_length=60)
+    details: str = Field(default="", max_length=4000)
+    assigned_to: int | None = None

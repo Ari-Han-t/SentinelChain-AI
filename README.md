@@ -89,6 +89,8 @@ Frontend:
 ```bash
 cd frontend
 npm install
+# If the API is not on port 8000, copy frontend/.env.example to frontend/.env
+# and set VITE_API_URL to the actual SentinelChain API URL.
 npm run dev
 ```
 

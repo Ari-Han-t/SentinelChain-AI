@@ -40,6 +40,9 @@ from .models import (
     SupplyChainNode,
     User,
     UserContext,
+    NodeTemplate, Workflow, WorkflowExecution, OperationalTask, InventoryLot, StockMovement,
+    PurchaseOrder, PurchaseOrderLine, Shipment, TrackingEvent, QualityInspection, Risk, Document,
+    ControlTowerException,
     utcnow,
 )
 from .schemas import (
@@ -60,6 +63,9 @@ from .schemas import (
     TokenResponse,
     UserContextRequest,
     VerifyNodeRequest,
+    NodeTemplateRequest, WorkflowRequest, TaskRequest, InventoryLotRequest, StockMovementRequest,
+    PurchaseOrderRequest, ShipmentRequest, TrackingEventRequest, QualityInspectionRequest,
+    RiskRequest, DocumentRequest, ExceptionRequest,
 )
 from .security import create_access_token, get_current_user, permissions_for, require_roles, sign_import, verify_import_signature, verify_password
 from .seed import bootstrap_admin, seed_database
@@ -100,7 +106,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origin_list,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
 )
 
@@ -1176,3 +1182,212 @@ def run_attack(
         "protected_decision": {"purchase_quantity": safe_quantity, "source": "last verified data"},
         "message": "Compromised input was blocked before forecasting or approval.",
     }
+
+
+# Universal SCM operating layer -------------------------------------------------
+def _record(db: Session, event: str, user: User, values: dict) -> dict:
+    append_audit(db, event, user.id, values)
+    db.commit()
+    return values
+
+
+def _dump(obj, extra: dict | None = None) -> dict:
+    data = {c.name: getattr(obj, c.name) for c in obj.__table__.columns}
+    if extra:
+        data.update(extra)
+    return data
+
+
+@app.get("/node-templates")
+def list_node_templates(_: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return [_dump(x, {"field_definitions": json.loads(x.field_definitions_json), "enabled_modules": json.loads(x.enabled_modules_json)}) for x in db.scalars(select(NodeTemplate).order_by(NodeTemplate.id)).all()]
+
+
+@app.post("/node-templates")
+def create_node_template(body: NodeTemplateRequest, user: User = Depends(require_roles(Role.ADMIN)), db: Session = Depends(get_db)):
+    if db.scalar(select(NodeTemplate).where(NodeTemplate.key == body.key)):
+        raise HTTPException(409, "Template key already exists")
+    item = NodeTemplate(name=body.name, key=body.key, description=body.description,
+                        field_definitions_json=json.dumps(body.field_definitions),
+                        enabled_modules_json=json.dumps(body.enabled_modules), created_by=user.id)
+    db.add(item); db.flush(); _record(db, "node_template.created", user, {"id": item.id}); return _dump(item, {"field_definitions": body.field_definitions, "enabled_modules": body.enabled_modules})
+
+
+@app.put("/node-templates/{template_id}")
+def update_node_template(template_id: int, body: NodeTemplateRequest, user: User = Depends(require_roles(Role.ADMIN)), db: Session = Depends(get_db)):
+    item = db.get(NodeTemplate, template_id)
+    if item is None: raise HTTPException(404, "Template not found")
+    item.name, item.key, item.description = body.name, body.key, body.description
+    item.field_definitions_json, item.enabled_modules_json = json.dumps(body.field_definitions), json.dumps(body.enabled_modules)
+    db.flush(); _record(db, "node_template.updated", user, {"id": item.id}); return _dump(item)
+
+
+@app.delete("/node-templates/{template_id}")
+def delete_node_template(template_id: int, user: User = Depends(require_roles(Role.ADMIN)), db: Session = Depends(get_db)):
+    item = db.get(NodeTemplate, template_id)
+    if item is None: raise HTTPException(404, "Template not found")
+    item.active = False; db.flush(); _record(db, "node_template.disabled", user, {"id": item.id}); return {"status": "disabled"}
+
+
+@app.post("/workflows")
+def create_workflow(body: WorkflowRequest, user: User = Depends(require_roles(Role.ADMIN)), db: Session = Depends(get_db)):
+    item = Workflow(name=body.name, trigger_json=json.dumps(body.trigger), conditions_json=json.dumps(body.conditions), actions_json=json.dumps(body.actions), status=body.status, created_by=user.id)
+    db.add(item); db.flush(); _record(db, "workflow.created", user, {"id": item.id}); return _dump(item)
+
+
+@app.get("/workflows")
+def list_workflows(_: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return [_dump(x) for x in db.scalars(select(Workflow).order_by(Workflow.id)).all()]
+
+
+@app.patch("/workflows/{workflow_id}")
+def update_workflow(workflow_id: int, body: dict, user: User = Depends(require_roles(Role.ADMIN)), db: Session = Depends(get_db)):
+    workflow = db.get(Workflow, workflow_id)
+    if workflow is None: raise HTTPException(404, "Workflow not found")
+    if "status" in body and body["status"] not in {"draft", "active", "disabled"}: raise HTTPException(422, "Invalid workflow state")
+    for key, column in (("name", "name"), ("status", "status")):
+        if key in body: setattr(workflow, column, body[key])
+    for key, column in (("trigger", "trigger_json"), ("conditions", "conditions_json"), ("actions", "actions_json")):
+        if key in body: setattr(workflow, column, json.dumps(body[key]))
+    db.flush(); _record(db, "workflow.updated", user, {"id": workflow.id}); return _dump(workflow)
+
+
+@app.post("/workflows/{workflow_id}/executions")
+def execute_workflow(workflow_id: int, payload: dict = {}, user: User = Depends(require_roles(Role.ADMIN, Role.MANAGER)), db: Session = Depends(get_db)):
+    workflow = db.get(Workflow, workflow_id)
+    if workflow is None or workflow.status != "active": raise HTTPException(409, "Workflow is not active")
+    execution = WorkflowExecution(workflow_id=workflow_id, status="completed", input_json=json.dumps(payload), output_json=json.dumps({"actions": json.loads(workflow.actions_json)}), started_at=utcnow(), finished_at=utcnow(), created_by=user.id)
+    db.add(execution); db.flush(); _record(db, "workflow.executed", user, {"id": execution.id, "workflow_id": workflow_id}); return _dump(execution)
+
+
+@app.post("/operational-tasks")
+def create_task(body: TaskRequest, user: User = Depends(require_roles(Role.ADMIN, Role.MANAGER, Role.ANALYST)), db: Session = Depends(get_db)):
+    item = OperationalTask(title=body.title, description=body.description, priority=body.priority, assigned_to=body.assigned_to, created_by=user.id)
+    db.add(item); db.flush(); _record(db, "task.created", user, {"id": item.id}); return _dump(item)
+
+
+@app.get("/operational-tasks")
+def list_tasks(_: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return [_dump(x) for x in db.scalars(select(OperationalTask).order_by(OperationalTask.id.desc())).all()]
+
+
+@app.patch("/operational-tasks/{task_id}")
+def update_task(task_id: int, body: dict, user: User = Depends(require_roles(Role.ADMIN, Role.MANAGER, Role.ANALYST)), db: Session = Depends(get_db)):
+    task = db.get(OperationalTask, task_id)
+    if task is None: raise HTTPException(404, "Task not found")
+    allowed = {"open", "in_progress", "blocked", "completed", "cancelled"}
+    if "status" in body and body["status"] not in allowed: raise HTTPException(422, "Invalid task state")
+    if task.status == "completed" and body.get("status") not in (None, "completed"): raise HTTPException(409, "Completed tasks cannot transition")
+    for key in ("status", "priority", "description", "title", "assigned_to"):
+        if key in body: setattr(task, key, body[key])
+    db.flush(); _record(db, "task.updated", user, {"id": task.id}); return _dump(task)
+
+
+@app.post("/inventory/lots")
+def create_lot(body: InventoryLotRequest, user: User = Depends(require_roles(Role.ADMIN, Role.MANAGER, Role.ANALYST)), db: Session = Depends(get_db)):
+    item = InventoryLot(sku=body.sku, lot_number=body.lot_number, quantity=body.quantity, location=body.location)
+    db.add(item); db.flush(); _record(db, "inventory.lot_created", user, {"id": item.id}); return _dump(item)
+
+
+@app.post("/inventory/movements")
+def create_movement(body: StockMovementRequest, user: User = Depends(require_roles(Role.ADMIN, Role.MANAGER, Role.ANALYST)), db: Session = Depends(get_db)):
+    lot = db.get(InventoryLot, body.lot_id)
+    if lot is None: raise HTTPException(404, "Inventory lot not found")
+    if lot.status == "quarantined" and body.movement_type != "transfer": raise HTTPException(409, "Quarantined lots cannot move")
+    delta = body.quantity if body.movement_type in ("receipt", "adjustment") else -body.quantity
+    if lot.quantity + delta < 0: raise HTTPException(422, "Movement would make stock negative")
+    lot.quantity += delta
+    item = StockMovement(lot_id=lot.id, movement_type=body.movement_type, quantity=body.quantity, reason=body.reason, created_by=user.id)
+    db.add(item); db.flush(); _record(db, "inventory.movement_created", user, {"id": item.id, "lot_id": lot.id}); return _dump(item, {"remaining_quantity": lot.quantity})
+
+
+@app.get("/inventory/lots")
+def list_lots(_: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return [_dump(x) for x in db.scalars(select(InventoryLot).order_by(InventoryLot.id)).all()]
+
+
+@app.post("/purchase-orders")
+def create_purchase_order(body: PurchaseOrderRequest, user: User = Depends(require_roles(Role.ADMIN, Role.MANAGER)), db: Session = Depends(get_db)):
+    if db.scalar(select(PurchaseOrder).where(PurchaseOrder.order_number == body.order_number)): raise HTTPException(409, "Order number already exists")
+    order = PurchaseOrder(order_number=body.order_number, supplier_id=body.supplier_id, status=body.status, created_by=user.id)
+    db.add(order); db.flush()
+    for line in body.lines:
+        if float(line.get("quantity", 0)) <= 0: raise HTTPException(422, "Line quantity must be positive")
+        db.add(PurchaseOrderLine(purchase_order_id=order.id, sku=str(line["sku"]), quantity=float(line["quantity"]), unit_cost=float(line.get("unit_cost", 0))))
+    db.flush(); _record(db, "purchase_order.created", user, {"id": order.id}); return _dump(order)
+
+
+@app.get("/purchase-orders")
+def list_purchase_orders(_: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return [_dump(x) for x in db.scalars(select(PurchaseOrder).order_by(PurchaseOrder.id)).all()]
+
+
+@app.post("/shipments")
+def create_shipment(body: ShipmentRequest, user: User = Depends(require_roles(Role.ADMIN, Role.MANAGER, Role.ANALYST)), db: Session = Depends(get_db)):
+    if body.purchase_order_id is not None and db.get(PurchaseOrder, body.purchase_order_id) is None: raise HTTPException(422, "Purchase order not found")
+    item = Shipment(shipment_number=body.shipment_number, purchase_order_id=body.purchase_order_id, carrier=body.carrier, tracking_number=body.tracking_number, created_by=user.id)
+    db.add(item); db.flush(); _record(db, "shipment.created", user, {"id": item.id, "purchase_order_id": body.purchase_order_id}); return _dump(item)
+
+
+@app.get("/shipments")
+def list_shipments(_: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return [_dump(x) for x in db.scalars(select(Shipment).order_by(Shipment.id)).all()]
+
+
+@app.post("/shipments/{shipment_id}/tracking-events")
+def add_tracking_event(shipment_id: int, body: TrackingEventRequest, user: User = Depends(require_roles(Role.ADMIN, Role.MANAGER, Role.ANALYST)), db: Session = Depends(get_db)):
+    if db.get(Shipment, shipment_id) is None: raise HTTPException(404, "Shipment not found")
+    item = TrackingEvent(shipment_id=shipment_id, status=body.status, location=body.location, notes=body.notes)
+    db.add(item); db.flush(); _record(db, "shipment.tracking_event", user, {"id": item.id}); return _dump(item)
+
+
+@app.get("/shipments/{shipment_id}/tracking-events")
+def list_tracking_events(shipment_id: int, _: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if db.get(Shipment, shipment_id) is None: raise HTTPException(404, "Shipment not found")
+    return [_dump(x) for x in db.scalars(select(TrackingEvent).where(TrackingEvent.shipment_id == shipment_id).order_by(TrackingEvent.occurred_at)).all()]
+
+
+@app.post("/quality/inspections")
+def create_quality_inspection(body: QualityInspectionRequest, user: User = Depends(require_roles(Role.ADMIN, Role.MANAGER, Role.ANALYST)), db: Session = Depends(get_db)):
+    lot = db.get(InventoryLot, body.lot_id)
+    if lot is None: raise HTTPException(404, "Inventory lot not found")
+    if body.result == "fail" and not body.quarantine_reason.strip(): raise HTTPException(422, "Failed inspections require quarantine reason")
+    if body.result == "pass" and body.disposition is not None: raise HTTPException(422, "Passing inspection cannot have disposition")
+    if body.result == "fail": lot.status = "quarantined"
+    elif body.result == "pass": lot.status = "available"
+    item = QualityInspection(lot_id=lot.id, result=body.result, quarantine_reason=body.quarantine_reason, disposition=body.disposition, inspected_by=user.id)
+    db.add(item); db.flush(); _record(db, "quality.inspection_created", user, {"id": item.id, "lot_id": lot.id}); return _dump(item, {"lot_status": lot.status})
+
+
+@app.post("/risks")
+def create_risk(body: RiskRequest, user: User = Depends(require_roles(Role.ADMIN, Role.MANAGER)), db: Session = Depends(get_db)):
+    item = Risk(title=body.title, description=body.description, likelihood=body.likelihood, impact=body.impact, owner_id=body.owner_id, created_by=user.id)
+    db.add(item); db.flush(); _record(db, "risk.created", user, {"id": item.id}); return _dump(item)
+
+
+@app.get("/risks")
+def list_risks(_: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return [_dump(x) for x in db.scalars(select(Risk).order_by(Risk.id)).all()]
+
+
+@app.post("/documents")
+def create_document(body: DocumentRequest, user: User = Depends(require_roles(Role.ADMIN, Role.MANAGER, Role.ANALYST)), db: Session = Depends(get_db)):
+    item = Document(name=body.name, document_type=body.document_type, content_digest=body.content_digest,
+                    metadata_json=json.dumps(body.metadata), created_by=user.id)
+    db.add(item); db.flush(); _record(db, "document.created", user, {"id": item.id}); return _dump(item, {"metadata": body.metadata})
+
+
+@app.get("/documents")
+def list_documents(_: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return [_dump(x, {"metadata": json.loads(x.metadata_json)}) for x in db.scalars(select(Document).order_by(Document.id)).all()]
+
+
+@app.post("/control-tower/exceptions")
+def create_exception(body: ExceptionRequest, user: User = Depends(require_roles(Role.ADMIN, Role.MANAGER)), db: Session = Depends(get_db)):
+    item = ControlTowerException(title=body.title, severity=body.severity, category=body.category, details=body.details, assigned_to=body.assigned_to, created_by=user.id)
+    db.add(item); db.flush(); _record(db, "control_tower.exception_created", user, {"id": item.id}); return _dump(item)
+
+
+@app.get("/control-tower/exceptions")
+def list_exceptions(_: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return [_dump(x) for x in db.scalars(select(ControlTowerException).order_by(ControlTowerException.id)).all()]
