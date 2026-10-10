@@ -69,6 +69,7 @@ from .schemas import (
 )
 from .security import create_access_token, get_current_user, permissions_for, require_roles, sign_import, verify_import_signature, verify_password
 from .seed import bootstrap_admin, seed_database
+from .step_policy import clearance_matrix, step_spec
 
 
 async def _monitoring_loop() -> None:
@@ -183,6 +184,11 @@ def me(user: User = Depends(get_current_user)) -> dict:
 @app.get("/auth/permissions")
 def auth_permissions(user: User = Depends(get_current_user)) -> dict:
     return {"role": user.role, "permissions": permissions_for(user.role)}
+
+
+@app.get("/security/clearance-matrix")
+def security_clearance_matrix(user: User = Depends(require_roles(Role.ADMIN))) -> dict:
+    return clearance_matrix()
 
 
 def _loads(value: str, fallback):
@@ -786,7 +792,13 @@ def node_inspector(node_id: int, user: User = Depends(get_current_user), db: Ses
         raise HTTPException(status_code=404, detail="Supply-chain node not found")
     evidence = db.scalars(select(EvidenceRecord).where(EvidenceRecord.node_id == node.id).order_by(EvidenceRecord.occurred_at.desc()).limit(50)).all()
     run, actions = _run_node_guidance(db, node, user.id)
-    return {"node": _node_dict(node), "evidence": [evidence_json(item) for item in evidence], "guidance": guidance_json(run, actions)}
+    users = db.scalars(select(User).order_by(User.id)).all()
+    return {
+        "node": _node_dict(node),
+        "step": step_spec(node, list(users)),
+        "evidence": [evidence_json(item) for item in evidence],
+        "guidance": guidance_json(run, actions),
+    }
 
 
 @app.post("/nodes/{node_id}/guidance/refresh")

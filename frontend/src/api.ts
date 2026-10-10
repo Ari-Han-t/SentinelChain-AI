@@ -101,6 +101,7 @@ export type Evidence = {
 
 export type NodeInspector = {
   node: SupplyChainNode
+  step: StepSpecification
   evidence: Evidence[]
   guidance: {
     id: number
@@ -114,6 +115,23 @@ export type NodeInspector = {
     stale: boolean
     actions: ActionProposal[]
   }
+}
+
+export type StepSpecification = {
+    name: string
+    key: string
+    stage_type: string
+    entities: {
+      people: Array<{ id: number; display_name: string; role: string; clearance_level: number; permissions: string[] }>
+      items: Array<{ name: string; quantity: number; access: string[] }>
+    }
+    actions: Array<{ key: string; label: string; permission: string; minimum_clearance: number; allowed: boolean; role: string; role_label: string }>
+    security: { policy_source: string; metadata_can_describe: boolean; authorization_enforced_by: string }
+}
+
+export type ClearanceMatrix = {
+    clearance_levels: Array<{ role: string; label: string; level: number; permissions: string[]; actions: Array<{ key: string; label: string; permission: string; minimum_clearance: number; allowed: boolean }> }>
+    items_by_stage: Record<string, Array<{ name: string; quantity: number; access: string[] }>>
 }
 
 export type SupplyChainSummary = {
@@ -224,6 +242,10 @@ export function getSupplyChain(token: string) {
 
 export function getPermissions(token: string) {
   return request<Permissions>('/auth/permissions', token)
+}
+
+export function getClearanceMatrix(token: string) {
+  return request<ClearanceMatrix>('/security/clearance-matrix', token)
 }
 
 export function getNodeTemplates(token: string) {
