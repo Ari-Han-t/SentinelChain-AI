@@ -1492,6 +1492,18 @@ def list_tracking_events(shipment_id: int, user: User = Depends(get_current_user
     return [_dump(x) for x in db.scalars(select(TrackingEvent).where(TrackingEvent.shipment_id == shipment_id).order_by(TrackingEvent.occurred_at)).all()]
 
 
+@app.get("/quality/inspections")
+def list_quality_inspections(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    inspections = []
+    for item in db.scalars(select(QualityInspection).order_by(QualityInspection.id)):
+        if not accessible(db, user, "inventory", item.lot_id):
+            continue
+        lot = db.get(InventoryLot, item.lot_id)
+        inspections.append(_dump(item, {"title": f"{lot.sku} · {lot.lot_number}",
+            "description": item.quarantine_reason, "lot_status": lot.status}))
+    return inspections
+
+
 @app.post("/quality/inspections")
 def create_quality_inspection(body: QualityInspectionRequest, user: User = Depends(require_roles(Role.ADMIN, Role.MANAGER, Role.ANALYST)), db: Session = Depends(get_db)):
     lot = db.scalar(select(InventoryLot).where(InventoryLot.id == body.lot_id).with_for_update())

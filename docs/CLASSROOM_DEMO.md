@@ -168,3 +168,11 @@ If port 5173 or 8000 is already in use, stop the conflicting local process or ch
 - [Technical reference](TECHNICAL_REFERENCE.md)
 - [PPT generation prompt](PPT_PROMPT.md)
 
+
+## Linked Operations dataset
+
+From `backend`, run `.venv/bin/python -m app.operations_demo` in a local demo environment. This additive, audited, idempotent loader creates explicitly fictional suppliers, warehouses, lots, purchase orders/lines, shipments/tracking, inspections, tasks, risks, templates and a draft workflow. Production and non-demo execution are refused. Existing catalog balances and records are preserved. A failed relay lot has 12 quarantined units; the remaining 26 are usable, with 180 units on a delayed inbound order.
+
+Stage evidence links the records into supplier, procurement, production and logistics knowledge. The existing guidance path reads this persisted evidence, so its rationale can reference the fictional operational situation. This loader categorizes structured fixtures by their schema; it does not demonstrate automatic classification of arbitrary uploads. Evidence is a labeled snapshot and needs refreshing when operational records change. No purchase is automatically executed; the example workflow remains a draft.
+
+Open Operations → Overview for category counts, then inventory, procurement, shipments, quality, tasks and risks. Entity details expose linked purchase orders, shipment tracking and inspections. Overview now fetches all categories directly instead of showing zeros until each tab is visited.

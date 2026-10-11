@@ -202,14 +202,14 @@ function OperationsView({ token, canManage }: { token: string; canManage: boolea
   const [tab, setTab] = useState<OperationsTab>('entities')
   const client = useQueryClient()
   const queries = {
-    templates: useQuery({ queryKey: ['node-templates'], queryFn: () => getNodeTemplates(token), enabled: tab === 'templates' }),
-    workflows: useQuery({ queryKey: ['workflows'], queryFn: () => getWorkflows(token), enabled: tab === 'workflows' }),
-    tasks: useQuery({ queryKey: ['operational-tasks'], queryFn: () => getOperationalTasks(token), enabled: tab === 'tasks' }),
-    inventory: useQuery({ queryKey: ['inventory-lots'], queryFn: () => getInventoryLots(token), enabled: tab === 'inventory' }),
-    procurement: useQuery({ queryKey: ['purchase-orders'], queryFn: () => getPurchaseOrders(token), enabled: tab === 'procurement' }),
-    shipments: useQuery({ queryKey: ['shipments'], queryFn: () => getShipments(token), enabled: tab === 'shipments' }),
-    quality: useQuery({ queryKey: ['quality-inspections'], queryFn: () => getQualityInspections(token), enabled: tab === 'quality' }),
-    risks: useQuery({ queryKey: ['risks'], queryFn: () => getRisks(token), enabled: tab === 'risks' }),
+    templates: useQuery({ queryKey: ['node-templates'], queryFn: () => getNodeTemplates(token), enabled: tab === 'templates' || tab === 'overview' }),
+    workflows: useQuery({ queryKey: ['workflows'], queryFn: () => getWorkflows(token), enabled: tab === 'workflows' || tab === 'overview' }),
+    tasks: useQuery({ queryKey: ['operational-tasks'], queryFn: () => getOperationalTasks(token), enabled: tab === 'tasks' || tab === 'overview' }),
+    inventory: useQuery({ queryKey: ['inventory-lots'], queryFn: () => getInventoryLots(token), enabled: tab === 'inventory' || tab === 'overview' }),
+    procurement: useQuery({ queryKey: ['purchase-orders'], queryFn: () => getPurchaseOrders(token), enabled: tab === 'procurement' || tab === 'overview' }),
+    shipments: useQuery({ queryKey: ['shipments'], queryFn: () => getShipments(token), enabled: tab === 'shipments' || tab === 'overview' }),
+    quality: useQuery({ queryKey: ['quality-inspections'], queryFn: () => getQualityInspections(token), enabled: tab === 'quality' || tab === 'overview' }),
+    risks: useQuery({ queryKey: ['risks'], queryFn: () => getRisks(token), enabled: tab === 'risks' || tab === 'overview' }),
     exceptions: useQuery({ queryKey: ['control-tower-exceptions'], queryFn: () => getControlTowerExceptions(token), enabled: tab === 'overview' }),
   }
   const tasks = queries.tasks.data ?? []
