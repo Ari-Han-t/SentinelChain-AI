@@ -1,0 +1,26 @@
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { afterEach, expect, it, vi } from 'vitest'
+import IntegrationManagement from '../src/IntegrationManagement'
+const connection={id:1,name:'Warehouse mock',system:'inventory',mode:'mock',profile:null,enabled:true,mock_scenario:'healthy',stale_after_seconds:3600,version:1,health:'mock_ready',checked_at:null,synced_at:null,retry_at:null,created_at:'2026-10-11T00:00:00Z',stale:false,busy:false,provenance:'mock',data_state:'mock',has_more:false}
+const record={id:1,connection_id:1,resource:'inventory',external_id:'MOCK-LOT',source_version:1,provenance:'mock',occurred_at:'2026-10-11T00:00:00Z',received_at:'2026-10-11T00:00:00Z',run_id:'run',entity_id:null,applied_version:null,applied_at:null,data:{sku:'MOCK-SKU',lot_number:'MOCK-LOT',quantity:50},stale:false,review_status:'pending_review',entity_version:null}
+afterEach(()=>{cleanup();vi.restoreAllMocks();vi.unstubAllGlobals()})
+function mount(){render(<QueryClientProvider client={new QueryClient({defaultOptions:{queries:{retry:false},mutations:{retry:false}}})}><IntegrationManagement token="token"/></QueryClientProvider>)}
+function fetcher(failed=false){return vi.fn(async(url:string,init?:RequestInit)=>({ok:true,json:async()=>url.endsWith('/profiles')?{profiles:[],mock_allowed:true}:url.endsWith('/runs')?[]:url.endsWith('/records/1')?record:url.includes('/records?')?{records:[record],total:1}:init?.method==='POST'?{status:failed?'failed':'succeeded',operation:'sync',accepted:3,duplicates:0,ignored:0,error_detail:'Partner rate limit'}:{connections:[connection],total:1}}))}
+it('labels synthetic records and blocks operational import',async()=>{
+ vi.stubGlobal('fetch',fetcher());mount();fireEvent.click(await screen.findByRole('button',{name:/View connection Warehouse mock/}));fireEvent.click(await screen.findByRole('button',{name:/Review record MOCK-LOT/}));expect(await screen.findByText(/Mock records cannot/)).toBeInTheDocument();expect(screen.queryByRole('button',{name:'Confirm operational import'})).toBeNull()
+})
+it('requires a reason for synchronization and reports a failed run as an alert',async()=>{
+ const fetch=fetcher(true);vi.stubGlobal('fetch',fetch);mount();fireEvent.click(await screen.findByRole('button',{name:/View connection Warehouse mock/}));expect(screen.getByRole('button',{name:'Synchronize inbox'})).toBeDisabled();fireEvent.change(screen.getByLabelText('Run reason'),{target:{value:'Check failure handling'}});fireEvent.click(screen.getByRole('button',{name:'Synchronize inbox'}));expect(await screen.findByRole('alert')).toHaveTextContent('Run failed: Partner rate limit');expect(fetch.mock.calls.find(([url])=>url.endsWith('/sync'))?.[1]?.body).toContain('idempotency_key')
+})
+it('defaults new connections to paused and makes mock provenance explicit',async()=>{
+ vi.stubGlobal('fetch',fetcher());mount();fireEvent.click(await screen.findByRole('button',{name:'Add connection'}));expect(screen.getByLabelText('Initial state')).toHaveValue('paused');expect(screen.getByLabelText('Data source')).toHaveValue('mock');expect(screen.getByText(/Mock adapters use synthetic fixtures/)).toBeInTheDocument()
+})
+it('shows connection load failures with a retry action',async()=>{
+ vi.stubGlobal('fetch',vi.fn(async()=>({ok:false,json:async()=>({detail:'Administrator access required'})})));mount();expect(await screen.findByRole('button',{name:'Retry connection list'})).toBeInTheDocument();expect(screen.getByRole('alert')).toHaveTextContent('Administrator access required')
+})
+it('requires review confirmation before importing a live source version',async()=>{
+ const base=fetcher();const liveRecord={...record,resource:'suppliers',provenance:'synchronized',external_id:'partner-supplier',data:{name:'Partner Components',reliability:.97}};
+ const fetch=vi.fn(async(url:string,init?:RequestInit)=>url.endsWith('/apply')?{ok:true,json:async()=>({entity_id:7,duplicate_request:false})}:url.endsWith('/records/1')?{ok:true,json:async()=>liveRecord}:url.includes('/records?')?{ok:true,json:async()=>({records:[liveRecord],total:1})}:url.includes('/entities/')?{ok:true,json:async()=>[]}:url.includes('/integrations')&&!url.endsWith('/profiles')&&!url.endsWith('/runs')?{ok:true,json:async()=>({connections:[{...connection,mode:'live',provenance:'live'}],total:1})}:base(url,init));
+ vi.stubGlobal('fetch',fetch);mount();fireEvent.click(await screen.findByRole('button',{name:/View connection Warehouse mock/}));fireEvent.click(await screen.findByRole('button',{name:/Review record partner-supplier/}));fireEvent.change(await screen.findByLabelText('Import reason'),{target:{value:'Reviewed partner identity'}});fireEvent.click(screen.getByRole('button',{name:'Review operational import'}));expect(fetch.mock.calls.some(([url])=>url.endsWith('/apply'))).toBe(false);fireEvent.click(screen.getByRole('button',{name:'Confirm operational import'}));expect(await screen.findByRole('status')).toHaveTextContent('Reviewed record imported');const posted=fetch.mock.calls.find(([url])=>url.endsWith('/apply'))!;expect(JSON.parse(String(posted[1]?.body))).toMatchObject({expected_source_version:1,target_entity_id:null,reason:'Reviewed partner identity'})
+})

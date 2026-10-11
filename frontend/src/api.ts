@@ -186,7 +186,8 @@ async function request<T>(path: string, token?: string, options: RequestInit = {
   })
   if (!response.ok) {
     const payload = await response.json().catch(() => ({ detail: 'Request failed' }))
-    throw new Error(payload.detail ?? 'Request failed')
+    const detail = payload.detail
+    throw new Error(Array.isArray(detail) ? detail.map((item: { loc?: Array<string | number>; msg?: string }) => `${item.loc?.join('.') ?? 'Input'}: ${item.msg ?? 'Invalid value'}`).join('; ') : typeof detail === 'string' ? detail : 'Request failed')
   }
   return response.json()
 }
@@ -387,3 +388,81 @@ export function updateUserContext(token: string, context: { owned_stages: string
     body: JSON.stringify({ ...context, decision_limits: { material_actions_require_approval: true }, escalation_preferences: { severity: 'high' } }),
   })
 }
+
+export type EntityKind = 'suppliers' | 'warehouses' | 'products' | 'inventory' | 'purchase-orders' | 'shipments'
+export type EntityGovernance = { owner_id: number | null; stage_id: number | null; warehouse_id: number | null; risk_level: string; minimum_clearance: number }
+export type ManagedEntity = { id: number; kind: EntityKind; data: Record<string, unknown>; governance: EntityGovernance; governance_labels?: Record<string, string>; active: boolean; version: number; related?: Record<string, Array<Record<string, unknown>>>; audit?: Array<Record<string, unknown>> }
+export const listEntities = (token: string, kind: EntityKind, filters = '') => request<ManagedEntity[]>(`/entities/${kind}${filters}`, token)
+export const getEntity = (token: string, kind: EntityKind, id: number) => request<ManagedEntity>(`/entities/${kind}/${id}`, token)
+export const getEntityUsers = (token: string) => request<Array<{ id: number; display_name: string; role: string }>>('/entities/users', token)
+export const saveEntity = (token: string, kind: EntityKind, body: { data: Record<string, unknown>; governance: EntityGovernance; reason: string; expected_version?: number }, id?: number) => request<ManagedEntity>(`/entities/${kind}${id ? `/${id}` : ''}`, token, { method: id ? 'PUT' : 'POST', body: JSON.stringify(body) })
+export const setEntityState = (token: string, entity: ManagedEntity, reason: string) => request<ManagedEntity>(`/entities/${entity.kind}/${entity.id}/state`, token, { method: 'POST', body: JSON.stringify({ active: !entity.active, expected_version: entity.version, reason }) })
+
+export type PolicyRule = {
+  key: string; operation: string; priority: number; active: boolean; minimum_clearance: number
+  deny_at_risk: string; max_quantity_delta: number | null; effective_from: string | null; effective_until: string | null
+}
+export type PolicyConfiguration = {
+  role_permissions: Record<string, string[]>; entity_clearance: Record<string, number>; operation_clearance: Record<string, number>
+  approval_quantity_threshold: number; approval_risk_threshold: number; rules: PolicyRule[]
+}
+export type PolicyRevision = {
+  id: number; configuration: PolicyConfiguration; status: string; base_generation: number; digest: string
+  created_by: number | null; created_at: string; reason: string; published_by: number | null; published_at: string | null
+}
+export type PolicyOverview = {
+  generation: number; active_revision_id: number; configuration: PolicyConfiguration; permission_ceiling: Record<string, string[]>
+  clearance_levels: Record<string, number>; revisions: PolicyRevision[]; users: Array<{id: number; display_name: string; role: string}>
+}
+export const getPolicies = (token: string) => request<PolicyOverview>('/security/policies', token)
+export const draftPolicy = (token: string, configuration: PolicyConfiguration, expected_generation: number, reason: string) => request<PolicyRevision>('/security/policies/drafts', token, {method:'POST', body:JSON.stringify({configuration,expected_generation,reason})})
+export const activatePolicy = (token: string, id: number, action: 'publish'|'revert', expected_generation: number, reason: string) => request<{generation:number;active_revision_id:number}>(`/security/policies/${id}/${action}`, token, {method:'POST',body:JSON.stringify({expected_generation,reason})})
+export const assignPolicyRole = (token: string, id: number, role: string, expected_role: string, reason: string) => request(`/security/policies/users/${id}/role`, token, {method:'POST',body:JSON.stringify({role,expected_role,reason})})
+
+export type IntegrationConnection = {
+  id:number; name:string; system:string; mode:'mock'|'live'; profile:string|null; enabled:boolean; mock_scenario:string; stale_after_seconds:number
+  version:number; health:string; checked_at:string|null; synced_at:string|null; retry_at:string|null; created_at:string; stale:boolean; busy:boolean
+  provenance:'mock'|'live'; data_state:string; has_more:boolean
+}
+export type IntegrationRun = {
+  id:string; connection_id:number; operation:string; status:string; attempts:number; accepted:number; duplicates:number; ignored:number
+  error_code:string|null; error_detail:string|null; reason:string; requested_by:number; started_at:string; finished_at:string|null; duplicate_request:boolean
+}
+export type IntegrationRecord = {
+  id:number; connection_id:number; resource:string; external_id:string; source_version:number; provenance:'mock'|'synchronized'; occurred_at:string; received_at:string
+  run_id:string; entity_id:number|null; applied_version:number|null; applied_at:string|null; data:Record<string,unknown>; stale:boolean; review_status:string; entity_version:number|null
+}
+export type IntegrationCreate = {name:string;system:string;mode:'mock'|'live';profile:string|null;enabled:boolean;mock_scenario:string;stale_after_seconds:number;reason:string}
+export const getIntegrations = (token:string) => request<{connections:IntegrationConnection[];total:number}>('/integrations',token)
+export const getIntegrationProfiles = (token:string) => request<{profiles:Array<{name:string;system:string}>;mock_allowed:boolean}>('/integrations/profiles',token)
+export const createIntegration = (token:string,body:IntegrationCreate) => request<IntegrationConnection>('/integrations',token,{method:'POST',body:JSON.stringify(body)})
+export const setIntegrationState = (token:string,id:number,enabled:boolean,expected_version:number,reason:string) => request<IntegrationConnection>(`/integrations/${id}/state`,token,{method:'POST',body:JSON.stringify({enabled,expected_version,reason})})
+export const runIntegration = (token:string,id:number,action:'check'|'sync',idempotency_key:string,reason:string) => request<IntegrationRun>(`/integrations/${id}/${action}`,token,{method:'POST',body:JSON.stringify({idempotency_key,reason})})
+export const getIntegrationRuns = (token:string,id:number) => request<IntegrationRun[]>(`/integrations/${id}/runs`,token)
+export const getIntegrationRecords = (token:string,id:number,q:string,review_status:string,offset=0) => request<{records:IntegrationRecord[];total:number}>(`/integrations/${id}/records?${new URLSearchParams({q,review_status,offset:String(offset)})}`,token)
+export const getIntegrationRecord = (token:string,id:number,recordId:number) => request<IntegrationRecord>(`/integrations/${id}/records/${recordId}`,token)
+export const applyIntegrationRecord = (token:string,id:number,recordId:number,body:{expected_source_version:number;target_entity_id:number|null;expected_entity_version:number|null;parent_entity_id:number|null;reason:string}) => request<{record_id:number;entity_id:number;duplicate_request:boolean}>(`/integrations/${id}/records/${recordId}/apply`,token,{method:'POST',body:JSON.stringify(body)})
+
+export type HistoryRecord={kind:'stock'|'stage';source_id:number;created_at:string;status:string;decided_by:{id:number;name:string}|null;decision_note:string|null;version:number;implementation_status:string;outcome:string;feedback:string;explanation:{summary:string;affected:{kind:string;id:number;name:string};category:string;severity:string;snapshot_state:string;evidence:Array<{kind:string;id:number;summary:string;data?:Record<string,unknown>;source?:string;status?:string;occurred_at?:string}>;reasoning:string;consequences:string[];mitigation:string[];confidence:number|null;confidence_basis:string;missing_information:string[];provider?:string;risk_values:Record<string,unknown>};history?:Array<{id:number;event_type:string;actor_id:number|null;actor_name:string;created_at:string;detail:Record<string,unknown>;audit_id:number}>;risk_history?:Array<Record<string,unknown>>}
+export const getRecommendationHistory=(token:string,params:string)=>request<{records:HistoryRecord[];total:number}>(`/recommendation-history?${params}`,token)
+export const getHistoryDetail=(token:string,kind:string,id:number)=>request<HistoryRecord>(`/recommendation-history/${kind}/${id}`,token)
+export const decideHistory=(token:string,kind:string,id:number,body:{decision:string;expected_status:string;note:string})=>request<HistoryRecord>(`/recommendation-history/${kind}/${id}/decision`,token,{method:'POST',body:JSON.stringify(body)})
+export const reportHistory=(token:string,kind:string,id:number,body:{expected_version:number;implementation_status:string;outcome:string;feedback:string;reason:string})=>request<HistoryRecord>(`/recommendation-history/${kind}/${id}/feedback`,token,{method:'POST',body:JSON.stringify(body)})
+export type Incident={id:number;category:string;severity:string;title:string;detail:string;entity_kind:string|null;entity_id:number|null;status:string;assigned_role:string;assigned_user_id:number|null;assigned_user_name:string|null;escalation_role:string;escalation_at:string;due_at:string;escalation_level:number;occurrence_count:number;acknowledged_by:number|null;acknowledged_at:string|null;resolved_by:number|null;resolved_at:string|null;resolution_note:string|null;version:number;created_at:string;last_occurred_at:string;overdue:boolean;deliveries?:Array<{id:number;user_id:number;level:number;channel:string;status:string;attempts:number;error_code:string|null;read_at:string|null;created_at:string}>;history?:Array<{id:number;event_type:string;actor_id:number|null;actor_name:string;created_at:string;detail:Record<string,unknown>}>}
+export type Notification={id:number;read_at:string|null;level:number;created_at:string;incident:Incident}
+export type NotificationRule={id:number;category:string;enabled:boolean;minimum_severity:string;assigned_role:string;assigned_user_id:number|null;escalation_role:string;escalation_minutes:number;remediation_minutes:number;quantity_threshold?:number;version:number}
+export const getNotifications=(token:string,unread=false,offset=0)=>request<{notifications:Notification[];total:number;unread_count:number}>(`/notifications?unread=${unread}&offset=${offset}`,token)
+export const readNotification=(token:string,id:number,read:boolean)=>request<{id:number;read_at:string|null}>(`/notifications/${id}/read`,token,{method:'POST',body:JSON.stringify({read})})
+export const getIncidents=(token:string,params:string)=>request<{incidents:Incident[];total:number}>(`/incidents?${params}`,token)
+export const getIncident=(token:string,id:number)=>request<Incident>(`/incidents/${id}`,token)
+export const changeIncident=(token:string,id:number,body:{expected_version:number;action:string;reason:string;assigned_role?:string;assigned_user_id?:number|null})=>request<Incident>(`/incidents/${id}/transition`,token,{method:'POST',body:JSON.stringify(body)})
+export const getNotificationRules=(token:string)=>request<{rules:NotificationRule[];users:Array<{id:number;name:string;role:string}>;channels:Array<{name:string;configured:boolean}>}>('/notification-rules',token)
+export const saveNotificationRule=(token:string,category:string,body:Omit<NotificationRule,'id'|'category'|'version'>&{expected_version:number;reason:string})=>request<NotificationRule>(`/notification-rules/${category}`,token,{method:'PUT',body:JSON.stringify(body)})
+export const reconcileNotifications=(token:string)=>request<{status:string;checked_at:string}>('/notifications/reconcile',token,{method:'POST'})
+
+export type SecurityAudit = {id:number;sequence:number;event_type:string;actor_id:number|null;actor_name:string;identity_type:string;entity:{kind:string;id:number}|null;created_at:string;authorization_decision:string;policy_revision_id:number|null;request_id:string|null;outcome:string;reason:string|null;severity:string;related:Record<string,number>;payload:Record<string,unknown>;metadata_state:string;event_hash:string}
+export type Simulation = {id:number;scenario:string;actor_id:number;policy_revision_id:number;audit_id:number;created_at:string;report:{status:string;detected:boolean;blocked:boolean;isolation:string;policies_evaluated?:string[];expected_outcome:string;actual_outcome:string;operational_state_unchanged:boolean;initial_conditions:Record<string,unknown>;final_conditions:Record<string,unknown>;simulated_actions:Array<Record<string,unknown>>;audit_events:Array<Record<string,unknown>>}}
+export const getSecurityAudit=(token:string,params:string)=>request<{records:SecurityAudit[];total:number;valid:boolean;broken_at:number|null;users:Array<{id:number;name:string}>}>(`/security/audit?${params}`,token)
+export const getSimulations=(token:string,offset=0)=>request<{records:Simulation[];total:number;enabled:boolean;scenarios:string[]}>(`/security/simulations?offset=${offset}`,token)
+export const runSimulation=(token:string,scenario:string,reason:string)=>request<Simulation>('/security/simulations',token,{method:'POST',body:JSON.stringify({scenario,reason})})
+export const getSecurityOverview=(token:string)=>request<{audit_integrity:{valid:boolean;broken_at:number|null};unresolved_total:number;unresolved_incidents:Array<{id:number;title:string;severity:string;status:string;owner:string;due_at:string;escalated:boolean}>;recent_simulations:Array<{id:number;scenario:string;status:string;created_at:string}>;integration_health:Array<{id:number;name:string;mode:string;enabled:boolean;synced_at:string|null;health:string}>;environment:{name:string;simulations_enabled:boolean;demo_data:boolean}}>('/security/overview',token)

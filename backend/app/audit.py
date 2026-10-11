@@ -2,10 +2,10 @@ import hashlib
 import json
 from datetime import datetime, timezone
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
-from .models import AuditEvent, utcnow
+from .models import AuditEvent, AuditWriteLock, utcnow
 
 GENESIS_HASH = "0" * 64
 
@@ -32,11 +32,30 @@ def _canonical_event(sequence: int, event_type: str, actor_id: int | None, paylo
     ).encode()
 
 
+def acquire_audit_lock(db: Session):
+    """Hold a singleton writer lock until transaction completion (SQLite/PG)."""
+    dialect=db.get_bind().dialect.name
+    if dialect=='sqlite':
+        from sqlalchemy.dialects.sqlite import insert
+    elif dialect=='postgresql':
+        from sqlalchemy.dialects.postgresql import insert
+    else:raise RuntimeError('Unsupported audit writer database')
+    db.execute(insert(AuditWriteLock).values(id=1,value=0).on_conflict_do_nothing(index_elements=['id']))
+    db.execute(update(AuditWriteLock).where(AuditWriteLock.id==1).values(value=AuditWriteLock.value+1))
+
+
 def append_audit(db: Session, event_type: str, actor_id: int | None, payload: dict) -> AuditEvent:
+    acquire_audit_lock(db)
     previous = db.scalar(select(AuditEvent).order_by(AuditEvent.sequence.desc()).limit(1))
     sequence = (previous.sequence + 1) if previous else 1
     previous_hash = previous.event_hash if previous else GENESIS_HASH
     created_at = utcnow()
+    from .observability import context, sanitize
+    from .models import PolicyState
+    state = db.get(PolicyState, 1)
+    payload = sanitize(dict(payload))
+    payload['_context'] = {**context(), 'policy_revision_id': state.active_revision_id if state else None,
+                           'policy_generation': state.generation if state else None}
     payload_json = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
     digest = hashlib.sha256(
         _canonical_event(sequence, event_type, actor_id, payload_json, created_at, previous_hash)
@@ -52,6 +71,10 @@ def append_audit(db: Session, event_type: str, actor_id: int | None, payload: di
     )
     db.add(event)
     db.flush()
+    from .recommendation_history import project_audit as project_recommendation
+    from .notifications.service import project_audit as project_notification
+    project_recommendation(db, event, payload)
+    project_notification(db, event, payload)
     return event
 
 

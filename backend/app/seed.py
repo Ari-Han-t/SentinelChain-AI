@@ -37,9 +37,10 @@ DEMO_USERS = [
 ]
 
 
-def seed_database() -> None:
-    init_db()
-    with SessionLocal() as db:
+def seed_database(session_factory=SessionLocal, initialize=True) -> None:
+    if initialize:
+        init_db()
+    with session_factory() as db:
         users = db.scalars(select(User).order_by(User.id)).all()
         if not users:
             users = [User(email=email, display_name=name, role=role.value, password_hash=hash_password("demo1234")) for email, name, role in DEMO_USERS]
@@ -132,6 +133,8 @@ def seed_database() -> None:
                 confidence=0.97,
             ))
         db.commit()
+        from .policies import initialize_policy
+        initialize_policy(db)
 
 
 def bootstrap_admin(email: str, password: str) -> None:

@@ -1,10 +1,11 @@
 from __future__ import annotations
+from .models import utc_naive
 
 import hashlib
 import json
 import time
 import asyncio
-from collections import defaultdict, deque
+from collections import OrderedDict, deque
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
 
@@ -70,6 +71,12 @@ from .schemas import (
 from .security import create_access_token, get_current_user, permissions_for, require_roles, sign_import, verify_import_signature, verify_password
 from .seed import bootstrap_admin, seed_database
 from .step_policy import clearance_matrix, step_spec
+from .policies import router as policy_router, initialize_policy, effective_permissions, enforce
+from .recommendation_history import router as recommendation_history_router
+from .notifications.router import router as notification_router
+from .notifications.service import reconcile as reconcile_notifications, initialize_rules
+from .integrations.router import router as integration_router
+from .entities import router as entity_router, accessible, guard, bump_version, entity_risk
 
 
 async def _monitoring_loop() -> None:
@@ -79,8 +86,21 @@ async def _monitoring_loop() -> None:
             nodes = db.scalars(select(SupplyChainNode).where(SupplyChainNode.active.is_(True))).all()
             for node in nodes:
                 latest = db.scalar(select(GuidanceRun).where(GuidanceRun.node_id == node.id).order_by(GuidanceRun.created_at.desc()).limit(1))
-                if latest is None or latest.next_check_at <= datetime.now(timezone.utc).replace(tzinfo=None):
+                if latest is None or utc_naive(latest.next_check_at) <= utcnow():
                     _run_node_guidance(db, node, None, force=True)
+
+
+async def _notification_loop() -> None:
+    while True:
+        await asyncio.sleep(settings.notification_interval_seconds)
+        def check_notifications():
+            with SessionLocal() as db:
+                reconcile_notifications(db)
+        try:
+            await asyncio.to_thread(check_notifications)
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).error("Notification reconciliation failed (%s)", type(exc).__name__)
 
 
 @asynccontextmanager
@@ -90,15 +110,23 @@ async def lifespan(_: FastAPI):
         seed_database()
     elif settings.bootstrap_admin_email and settings.bootstrap_admin_password:
         bootstrap_admin(settings.bootstrap_admin_email, settings.bootstrap_admin_password)
+    with SessionLocal() as db:
+        initialize_policy(db)
+        initialize_rules(db)
+        db.commit()
+    notifier = asyncio.create_task(_notification_loop())
     monitor = asyncio.create_task(_monitoring_loop())
     try:
         yield
     finally:
         monitor.cancel()
+        notifier.cancel()
 
 
 app = FastAPI(
     title="SentinelChain AI API",
+    docs_url=None if settings.environment.lower()=="production" else "/docs",
+    redoc_url=None if settings.environment.lower()=="production" else "/redoc",
     version="1.0.0",
     description="Security-first inventory intelligence with a synthetic-data demo.",
     lifespan=lifespan,
@@ -111,7 +139,17 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type"],
 )
 
-request_windows: dict[str, deque[float]] = defaultdict(deque)
+from .simulations import router as simulation_router
+from .audit_explorer import router as audit_explorer_router
+app.include_router(simulation_router)
+app.include_router(audit_explorer_router)
+app.include_router(entity_router)
+app.include_router(policy_router)
+app.include_router(integration_router)
+app.include_router(recommendation_history_router)
+app.include_router(notification_router)
+
+request_windows: OrderedDict[str, deque[float]] = OrderedDict()
 
 
 @app.middleware("http")
@@ -120,6 +158,10 @@ async def rate_limit(request: Request, call_next):
         return await call_next(request)
     now = time.monotonic()
     key = request.client.host if request.client else "unknown"
+    if key not in request_windows:
+        if len(request_windows) >= 10000: request_windows.popitem(last=False)
+        request_windows[key] = deque()
+    request_windows.move_to_end(key)
     window = request_windows[key]
     while window and now - window[0] > 60:
         window.popleft()
@@ -128,6 +170,28 @@ async def rate_limit(request: Request, call_next):
     window.append(now)
     return await call_next(request)
 
+
+
+@app.middleware('http')
+async def request_visibility(request: Request, call_next):
+    from uuid import uuid4
+    import logging
+    from .observability import request_context
+    from sqlalchemy.exc import SQLAlchemyError
+    request_id=str(uuid4())
+    token=request_context.set({'request_id':request_id,'identity':'request','operation':request.method+' '+request.url.path})
+    started=time.monotonic()
+    try:
+        try: response=await call_next(request)
+        except SQLAlchemyError:
+            response=JSONResponse(status_code=503,content={'detail':'Database unavailable; retry later'})
+        response.headers.update({'X-Request-ID':request_id,'X-Content-Type-Options':'nosniff','X-Frame-Options':'DENY','Referrer-Policy':'no-referrer','Cache-Control':'no-store','Content-Security-Policy':"default-src 'none'; frame-ancestors 'none'"})
+        if settings.environment.lower()=='production':response.headers['Strict-Transport-Security']='max-age=31536000'
+        elif request.url.path in ('/docs','/redoc'):
+            response.headers['Content-Security-Policy']="default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; img-src 'self' data: https://fastapi.tiangolo.com; connect-src 'self'; frame-ancestors 'none'"
+        logging.getLogger('sentinel.requests').info(json.dumps({'request_id':request_id,'method':request.method,'status':response.status_code,'duration_ms':round((time.monotonic()-started)*1000)}))
+        return response
+    finally:request_context.reset(token)
 
 def user_json(user: User) -> dict:
     return {"id": user.id, "email": user.email, "display_name": user.display_name, "role": user.role}
@@ -166,10 +230,25 @@ def health() -> dict:
     return {"status": "ok", "service": "sentinelchain-api"}
 
 
+@app.get('/ready')
+def ready(db: Session = Depends(get_db)):
+    from sqlalchemy import text
+    from sqlalchemy.exc import SQLAlchemyError
+    try:
+        db.execute(text('SELECT 1'))
+        from .policies import active_policy
+        active_policy(db)
+    except (SQLAlchemyError, HTTPException):
+        raise HTTPException(503, 'Database or policy is not ready')
+    return {'status':'ready'}
+
+
 @app.post("/auth/login", response_model=TokenResponse)
 def login(body: LoginRequest, db: Session = Depends(get_db)) -> TokenResponse:
     user = db.scalar(select(User).where(User.email == body.email.lower()))
     if user is None or not verify_password(body.password, user.password_hash):
+        append_audit(db, "auth.failed", None, {"outcome":"denied","reason":"invalid_credentials"})
+        db.commit()
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
     append_audit(db, "auth.login", user.id, {"email": user.email})
     db.commit()
@@ -182,13 +261,19 @@ def me(user: User = Depends(get_current_user)) -> dict:
 
 
 @app.get("/auth/permissions")
-def auth_permissions(user: User = Depends(get_current_user)) -> dict:
-    return {"role": user.role, "permissions": permissions_for(user.role)}
+def auth_permissions(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
+    return {"role": user.role, "permissions": effective_permissions(db, user.role)}
 
 
 @app.get("/security/clearance-matrix")
 def security_clearance_matrix(user: User = Depends(require_roles(Role.ADMIN))) -> dict:
-    return clearance_matrix()
+    matrix = clearance_matrix()
+    with SessionLocal() as db:
+        for level in matrix["clearance_levels"]:
+            level["permissions"] = effective_permissions(db, level["role"])
+            for action in level["actions"]:
+                action["allowed"] = action["allowed"] and action["permission"] in level["permissions"]
+    return matrix
 
 
 def _loads(value: str, fallback):
@@ -357,7 +442,7 @@ def _run_node_guidance(db: Session, node: SupplyChainNode, actor_id: int | None,
     db.flush()
     actions: list[ActionProposal] = []
     for suggestion in payload.actions:
-        existing = db.scalar(select(ActionProposal).where(ActionProposal.node_id == node.id, ActionProposal.title == suggestion.title, ActionProposal.status == "pending"))
+        existing = db.scalar(select(ActionProposal).where(ActionProposal.node_id == node.id, ActionProposal.title == suggestion.title, ActionProposal.status.in_(["pending", "deferred"])))
         if existing:
             actions.append(existing)
             continue
@@ -373,7 +458,7 @@ def _run_node_guidance(db: Session, node: SupplyChainNode, actor_id: int | None,
         )
         db.add(action)
         actions.append(action)
-    append_audit(db, "guidance.generated", actor_id, {"node_id": node.id, "provider": provider, "evidence_ids": payload.evidence_ids, "action_count": len(actions)})
+    append_audit(db, "guidance.generated", actor_id, {"node_id": node.id, "run_id": run.id, "provider": provider, "evidence_ids": payload.evidence_ids, "action_count": len(actions)})
     db.commit()
     return run, actions
 
@@ -386,6 +471,8 @@ def guidance_json(run: GuidanceRun, actions: list[ActionProposal]) -> dict:
         "rationale": run.rationale,
         "evidence_ids": _loads(run.evidence_ids_json, []),
         "confidence": run.confidence,
+        "confidence_calibrated": False,
+        "confidence_basis": "Provider/heuristic score is not a calibrated probability of correctness.",
         "no_action_required": run.no_action_required,
         "next_check_at": run.next_check_at,
         "stale": run.stale,
@@ -795,14 +882,14 @@ def node_inspector(node_id: int, user: User = Depends(get_current_user), db: Ses
     users = db.scalars(select(User).order_by(User.id)).all()
     return {
         "node": _node_dict(node),
-        "step": step_spec(node, list(users)),
+        "step": step_spec(node, list(users), db),
         "evidence": [evidence_json(item) for item in evidence],
         "guidance": guidance_json(run, actions),
     }
 
 
 @app.post("/nodes/{node_id}/guidance/refresh")
-def refresh_guidance(node_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
+def refresh_guidance(node_id: int, user: User = Depends(require_roles(Role.ADMIN, Role.MANAGER, Role.ANALYST, Role.AUDITOR)), db: Session = Depends(get_db)) -> dict:
     node = _node_or_404(db, node_id)
     previous = db.scalars(select(GuidanceRun).where(GuidanceRun.node_id == node.id, GuidanceRun.stale.is_(False))).all()
     for item in previous:
@@ -839,6 +926,10 @@ def action_queue(user: User = Depends(get_current_user), db: Session = Depends(g
 
 @app.post("/actions/{action_id}/decision")
 def decide_action(action_id: int, body: ActionDecisionRequest, user: User = Depends(require_roles(Role.ADMIN, Role.MANAGER)), db: Session = Depends(get_db)) -> dict:
+    existing = db.get(ActionProposal, action_id)
+    if existing is None: raise HTTPException(404, "Action proposal not found")
+    if body.decision == "approved":
+        enforce(db, user, "approval.decide", risk=existing.urgency if existing.urgency in ("high", "critical") else "low")
     result = db.execute(update(ActionProposal).where(ActionProposal.id == action_id, ActionProposal.status == body.expected_status).values(status=body.decision, decided_by=user.id, decision_note=body.note))
     if result.rowcount == 0:
         existing = db.get(ActionProposal, action_id)
@@ -870,17 +961,18 @@ def escalate_action(
 
 
 @app.get("/dashboard")
-def dashboard(_: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
-    products = db.scalars(select(Product).order_by(Product.sku)).all()
+def dashboard(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
+    products = [p for p in db.scalars(select(Product).order_by(Product.sku)) if accessible(db, user, "products", p.id)]
     alerts = db.scalars(select(Alert).where(Alert.status == "open").order_by(Alert.created_at.desc()).limit(5)).all()
     recommendations = db.scalars(select(Recommendation).order_by(Recommendation.created_at.desc()).limit(5)).all()
     recent_start = date.today() - timedelta(days=29)
     sales = db.execute(
         select(SaleRecord.sold_at, func.sum(SaleRecord.quantity))
-        .where(SaleRecord.sold_at >= recent_start)
+        .where(SaleRecord.sold_at >= recent_start, SaleRecord.product_id.in_([p.id for p in products]))
         .group_by(SaleRecord.sold_at)
         .order_by(SaleRecord.sold_at)
     ).all()
+    recommendations = [r for r in recommendations if r.product_id in {p.id for p in products}]
     product_map = {product.id: product for product in products}
     low_stock = sum(1 for product in products if product.current_stock < product.lead_time_days * 10)
     return {
@@ -943,6 +1035,16 @@ def ingest_import(
     digest = hashlib.sha256(content).hexdigest()
     if db.scalar(select(ImportBatch).where(ImportBatch.digest == digest)):
         raise HTTPException(status_code=409, detail="This exact dataset has already been imported")
+    product_map = {item.sku: item for item in db.scalars(select(Product)).all()}
+    # Evaluate all affected products before adding any imported operational rows.
+    affected = {str(analysis.frame.loc[index]["sku"]) for index in analysis.accepted_indices}
+    if not affected:
+        enforce(db, user, "forecast.modify")
+    for sku in sorted(affected):
+        product = product_map.get(sku)
+        if product is not None:
+            guard(db, user, "products", product.id, True)
+        enforce(db, user, "forecast.modify", risk=entity_risk(db, "products", product.id) if product else "low")
     batch = ImportBatch(
         dataset_name=body.dataset_name,
         digest=digest,
@@ -970,6 +1072,7 @@ def ingest_import(
                 }
             )
             continue
+        guard(db, user, "products", product.id, True)
         db.add(SaleRecord(product_id=product.id, sold_at=row["date"].date(), quantity=float(row["quantity"]), source_import_id=batch.id))
         accepted += 1
     for item in quarantined:
@@ -1006,6 +1109,8 @@ def create_forecast(
     product = db.scalar(select(Product).where(Product.sku == sku))
     if product is None:
         raise HTTPException(status_code=404, detail="Product not found")
+    guard(db, user, "products", product.id, True)
+    enforce(db, user, "forecast.modify", risk=entity_risk(db, "products", product.id))
     records = db.scalars(select(SaleRecord).where(SaleRecord.product_id == product.id).order_by(SaleRecord.sold_at)).all()
     try:
         result = train_forecast(pd.DataFrame([{"date": row.sold_at, "quantity": row.quantity} for row in records]))
@@ -1030,10 +1135,11 @@ def create_forecast(
 
 
 @app.get("/forecasts/{sku}")
-def latest_forecast(sku: str, _: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
+def latest_forecast(sku: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
     product = db.scalar(select(Product).where(Product.sku == sku))
     if product is None:
         raise HTTPException(status_code=404, detail="Product not found")
+    guard(db, user, "products", product.id)
     forecast = db.scalar(select(Forecast).where(Forecast.product_id == product.id).order_by(Forecast.created_at.desc()).limit(1))
     if forecast is None:
         raise HTTPException(status_code=404, detail="No forecast has been trained for this product")
@@ -1060,6 +1166,7 @@ def generate_recommendation(
     product = db.scalar(select(Product).where(Product.sku == sku))
     if product is None:
         raise HTTPException(status_code=404, detail="Product not found")
+    guard(db, user, "products", product.id, True)
     forecast = db.scalar(select(Forecast).where(Forecast.product_id == product.id).order_by(Forecast.created_at.desc()).limit(1))
     if forecast is None:
         raise HTTPException(status_code=409, detail="Train a forecast before generating a recommendation")
@@ -1075,7 +1182,7 @@ def generate_recommendation(
         product.holding_cost_rate,
         product.current_stock,
     )
-    suppliers = db.scalars(select(Supplier)).all()
+    suppliers = [s for s in db.scalars(select(Supplier)) if accessible(db, user, "suppliers", s.id, True)]
     risk = min((supplier_risk(s.reliability, s.average_lead_time, s.defect_rate, s.price_variance) for s in suppliers), default=100.0)
     item = Recommendation(product_id=product.id, forecast_id=forecast.id, supplier_risk=risk, **policy)
     db.add(item)
@@ -1086,10 +1193,10 @@ def generate_recommendation(
 
 
 @app.get("/recommendations")
-def recommendations(_: User = Depends(get_current_user), db: Session = Depends(get_db)) -> list[dict]:
+def recommendations(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> list[dict]:
     items = db.scalars(select(Recommendation).order_by(Recommendation.created_at.desc())).all()
     products = {item.id: item for item in db.scalars(select(Product)).all()}
-    return [recommendation_json(item, products.get(item.product_id)) for item in items]
+    return [recommendation_json(item, products.get(item.product_id)) for item in items if accessible(db, user, "products", item.product_id)]
 
 
 @app.post("/recommendations/{recommendation_id}/decision")
@@ -1099,6 +1206,11 @@ def decide_recommendation(
     user: User = Depends(require_roles(Role.ADMIN, Role.MANAGER)),
     db: Session = Depends(get_db),
 ) -> dict:
+    existing = db.get(Recommendation, recommendation_id)
+    if existing is not None:
+        guard(db, user, "products", existing.product_id, True)
+        if body.decision == "approved":
+            enforce(db, user, "approval.decide", risk=entity_risk(db, "products", existing.product_id), recommendation=existing)
     result = db.execute(
         update(Recommendation)
         .where(Recommendation.id == recommendation_id, Recommendation.status == body.expected_status)
@@ -1116,7 +1228,7 @@ def decide_recommendation(
 
 
 @app.get("/suppliers")
-def suppliers(_: User = Depends(get_current_user), db: Session = Depends(get_db)) -> list[dict]:
+def suppliers(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> list[dict]:
     rows = db.scalars(select(Supplier).order_by(Supplier.name)).all()
     return [
         {
@@ -1128,7 +1240,7 @@ def suppliers(_: User = Depends(get_current_user), db: Session = Depends(get_db)
             "price_variance": row.price_variance,
             "risk_score": supplier_risk(row.reliability, row.average_lead_time, row.defect_rate, row.price_variance),
         }
-        for row in rows
+        for row in rows if accessible(db, user, "suppliers", row.id)
     ]
 
 
@@ -1139,11 +1251,20 @@ def alerts(_: User = Depends(get_current_user), db: Session = Depends(get_db)) -
 
 @app.get("/audit")
 def audit_history(
-    _: User = Depends(require_roles(Role.ADMIN, Role.AUDITOR)),
+    user: User = Depends(require_roles(Role.ADMIN, Role.AUDITOR)),
     db: Session = Depends(get_db),
 ) -> dict:
     valid, broken_at = verify_chain(db)
     events = db.scalars(select(AuditEvent).order_by(AuditEvent.sequence.desc()).limit(100)).all()
+    from .audit_explorer import describe, visible
+    from .observability import sanitize
+    events = [event for event in events if visible(db, user, describe(db, event))]
+    # Audit capability does not lower an entity's configured read clearance.
+    events = [event for event in events if not (
+        event.event_type.startswith("entity.")
+        and (payload := json.loads(event.payload_json)).get("kind")
+        and not accessible(db, user, payload["kind"], payload["entity_id"])
+    )]
     return {
         "valid": valid,
         "broken_at": broken_at,
@@ -1152,7 +1273,7 @@ def audit_history(
                 "sequence": event.sequence,
                 "event_type": event.event_type,
                 "actor_id": event.actor_id,
-                "payload": json.loads(event.payload_json),
+                "payload": sanitize(json.loads(event.payload_json)),
                 "previous_hash": event.previous_hash,
                 "event_hash": event.event_hash,
                 "created_at": event.created_at,
@@ -1168,7 +1289,7 @@ def run_attack(
     user: User = Depends(require_roles(Role.ADMIN)),
     db: Session = Depends(get_db),
 ) -> dict:
-    if not settings.demo_mode:
+    if not settings.demo_mode or settings.environment.lower() == "production":
         raise HTTPException(status_code=404, detail="Demo attack utility is disabled")
     product = db.scalar(select(Product).where(Product.sku == body.sku))
     if product is None:
@@ -1181,8 +1302,9 @@ def run_attack(
     category, title, evidence, unsafe_quantity = attack_details[body.attack_type]
     alert = Alert(category=category, severity="critical", title=title, detail=f"Demo-only {body.attack_type.replace('_', ' ')} attempt for {body.sku}: {evidence}.")
     db.add(alert)
+    db.flush()
     # Demo attacks have no real import batch; preserve evidence in the audit and alert stores.
-    append_audit(db, "demo.attack_blocked", user.id, {"attack_type": body.attack_type, "sku": body.sku, "evidence": evidence})
+    append_audit(db, "demo.attack_blocked", user.id, {"attack_type": body.attack_type, "sku": body.sku, "alert_id": alert.id, "evidence": evidence})
     db.commit()
     safe_quantity = max(0, round(product.lead_time_days * 24 - product.current_stock))
     return {
@@ -1297,29 +1419,34 @@ def update_task(task_id: int, body: dict, user: User = Depends(require_roles(Rol
 
 @app.post("/inventory/lots")
 def create_lot(body: InventoryLotRequest, user: User = Depends(require_roles(Role.ADMIN, Role.MANAGER, Role.ANALYST)), db: Session = Depends(get_db)):
+    product = db.scalar(select(Product).where(Product.sku == body.sku))
+    if product is not None:
+        guard(db, user, "products", product.id, True)
+    enforce(db, user, "inventory.change", quantity_delta=body.quantity)
     item = InventoryLot(sku=body.sku, lot_number=body.lot_number, quantity=body.quantity, location=body.location)
     db.add(item); db.flush(); _record(db, "inventory.lot_created", user, {"id": item.id}); return _dump(item)
 
 
 @app.post("/inventory/movements")
 def create_movement(body: StockMovementRequest, user: User = Depends(require_roles(Role.ADMIN, Role.MANAGER, Role.ANALYST)), db: Session = Depends(get_db)):
-    lot = db.get(InventoryLot, body.lot_id)
-    if lot is None: raise HTTPException(404, "Inventory lot not found")
-    if lot.status == "quarantined" and body.movement_type != "transfer": raise HTTPException(409, "Quarantined lots cannot move")
-    delta = body.quantity if body.movement_type in ("receipt", "adjustment") else -body.quantity
-    if lot.quantity + delta < 0: raise HTTPException(422, "Movement would make stock negative")
-    lot.quantity += delta
-    item = StockMovement(lot_id=lot.id, movement_type=body.movement_type, quantity=body.quantity, reason=body.reason, created_by=user.id)
-    db.add(item); db.flush(); _record(db, "inventory.movement_created", user, {"id": item.id, "lot_id": lot.id}); return _dump(item, {"remaining_quantity": lot.quantity})
+    from .inventory_ops import apply_movement
+    item = apply_movement(db,user,body)
+    lot = db.get(InventoryLot,body.lot_id)
+    db.commit()
+    return _dump(item,{"remaining_quantity":lot.quantity})
 
 
 @app.get("/inventory/lots")
-def list_lots(_: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    return [_dump(x) for x in db.scalars(select(InventoryLot).order_by(InventoryLot.id)).all()]
+def list_lots(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return [_dump(x) for x in db.scalars(select(InventoryLot).order_by(InventoryLot.id)).all() if accessible(db, user, "inventory", x.id)]
 
 
 @app.post("/purchase-orders")
 def create_purchase_order(body: PurchaseOrderRequest, user: User = Depends(require_roles(Role.ADMIN, Role.MANAGER)), db: Session = Depends(get_db)):
+    if body.supplier_id is not None:
+        supplier = db.get(Supplier, body.supplier_id)
+        if supplier is None: raise HTTPException(422, "Supplier not found")
+        guard(db, user, "suppliers", supplier.id, True)
     if db.scalar(select(PurchaseOrder).where(PurchaseOrder.order_number == body.order_number)): raise HTTPException(409, "Order number already exists")
     order = PurchaseOrder(order_number=body.order_number, supplier_id=body.supplier_id, status=body.status, created_by=user.id)
     db.add(order); db.flush()
@@ -1330,43 +1457,51 @@ def create_purchase_order(body: PurchaseOrderRequest, user: User = Depends(requi
 
 
 @app.get("/purchase-orders")
-def list_purchase_orders(_: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    return [_dump(x) for x in db.scalars(select(PurchaseOrder).order_by(PurchaseOrder.id)).all()]
+def list_purchase_orders(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return [_dump(x) for x in db.scalars(select(PurchaseOrder).order_by(PurchaseOrder.id)).all() if accessible(db, user, "purchase-orders", x.id)]
 
 
 @app.post("/shipments")
 def create_shipment(body: ShipmentRequest, user: User = Depends(require_roles(Role.ADMIN, Role.MANAGER, Role.ANALYST)), db: Session = Depends(get_db)):
     if body.purchase_order_id is not None and db.get(PurchaseOrder, body.purchase_order_id) is None: raise HTTPException(422, "Purchase order not found")
+    if body.purchase_order_id is not None:
+        guard(db, user, "purchase-orders", body.purchase_order_id, True)
+    if db.scalar(select(Shipment).where(Shipment.shipment_number == body.shipment_number)):
+        raise HTTPException(409, "Shipment number already exists")
     item = Shipment(shipment_number=body.shipment_number, purchase_order_id=body.purchase_order_id, carrier=body.carrier, tracking_number=body.tracking_number, created_by=user.id)
     db.add(item); db.flush(); _record(db, "shipment.created", user, {"id": item.id, "purchase_order_id": body.purchase_order_id}); return _dump(item)
 
 
 @app.get("/shipments")
-def list_shipments(_: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    return [_dump(x) for x in db.scalars(select(Shipment).order_by(Shipment.id)).all()]
+def list_shipments(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return [_dump(x) for x in db.scalars(select(Shipment).order_by(Shipment.id)).all() if accessible(db, user, "shipments", x.id)]
 
 
 @app.post("/shipments/{shipment_id}/tracking-events")
 def add_tracking_event(shipment_id: int, body: TrackingEventRequest, user: User = Depends(require_roles(Role.ADMIN, Role.MANAGER, Role.ANALYST)), db: Session = Depends(get_db)):
     if db.get(Shipment, shipment_id) is None: raise HTTPException(404, "Shipment not found")
+    guard(db, user, "shipments", shipment_id, True)
     item = TrackingEvent(shipment_id=shipment_id, status=body.status, location=body.location, notes=body.notes)
-    db.add(item); db.flush(); _record(db, "shipment.tracking_event", user, {"id": item.id}); return _dump(item)
+    db.add(item); db.flush(); _record(db, "shipment.tracking_event", user, {"id": item.id, "shipment_id": shipment_id}); return _dump(item)
 
 
 @app.get("/shipments/{shipment_id}/tracking-events")
-def list_tracking_events(shipment_id: int, _: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def list_tracking_events(shipment_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     if db.get(Shipment, shipment_id) is None: raise HTTPException(404, "Shipment not found")
+    guard(db, user, "shipments", shipment_id)
     return [_dump(x) for x in db.scalars(select(TrackingEvent).where(TrackingEvent.shipment_id == shipment_id).order_by(TrackingEvent.occurred_at)).all()]
 
 
 @app.post("/quality/inspections")
 def create_quality_inspection(body: QualityInspectionRequest, user: User = Depends(require_roles(Role.ADMIN, Role.MANAGER, Role.ANALYST)), db: Session = Depends(get_db)):
-    lot = db.get(InventoryLot, body.lot_id)
+    lot = db.scalar(select(InventoryLot).where(InventoryLot.id == body.lot_id).with_for_update())
     if lot is None: raise HTTPException(404, "Inventory lot not found")
+    guard(db, user, "inventory", lot.id, True)
     if body.result == "fail" and not body.quarantine_reason.strip(): raise HTTPException(422, "Failed inspections require quarantine reason")
     if body.result == "pass" and body.disposition is not None: raise HTTPException(422, "Passing inspection cannot have disposition")
     if body.result == "fail": lot.status = "quarantined"
     elif body.result == "pass": lot.status = "available"
+    bump_version(db, "inventory", lot.id)
     item = QualityInspection(lot_id=lot.id, result=body.result, quarantine_reason=body.quarantine_reason, disposition=body.disposition, inspected_by=user.id)
     db.add(item); db.flush(); _record(db, "quality.inspection_created", user, {"id": item.id, "lot_id": lot.id}); return _dump(item, {"lot_status": lot.status})
 

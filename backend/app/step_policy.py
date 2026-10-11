@@ -124,7 +124,7 @@ def clearance_matrix() -> dict[str, Any]:
     }
 
 
-def step_spec(node: SupplyChainNode, users: list[User]) -> dict[str, Any]:
+def step_spec(node: SupplyChainNode, users: list[User], db=None) -> dict[str, Any]:
     people = []
     involved_roles = {node.owner_role, Role.ADMIN.value, Role.AUDITOR.value}
     for user in sorted(users, key=lambda item: (CLEARANCE_LEVELS.get(item.role, 0), item.id), reverse=True):
@@ -148,6 +148,12 @@ def step_spec(node: SupplyChainNode, users: list[User]) -> dict[str, Any]:
         for role in sorted(CLEARANCE_LEVELS, key=CLEARANCE_LEVELS.get, reverse=True)
         for action in POLICY_ACTIONS
     ]
+    if db is not None:
+        from .policies import effective_permissions
+        for person in people:
+            person["permissions"] = effective_permissions(db, person["role"])
+        for action in actions:
+            action["allowed"] = action["allowed"] and action["permission"] in effective_permissions(db, action["role"])
     return {
         "name": node.name,
         "key": node.key,

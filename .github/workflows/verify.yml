@@ -1,0 +1,32 @@
+name: Verify SentinelChain
+on: [push, pull_request]
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: sentinel_test
+          POSTGRES_PASSWORD: disposable-ci-password
+          POSTGRES_DB: sentinel_test_ci
+        ports: ['5432:5432']
+        options: --health-cmd "pg_isready -U sentinel_test -d sentinel_test_ci" --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - uses: actions/setup-node@v4
+        with: {node-version: '22'}
+      - run: pip install -r backend/requirements.txt
+      - run: python -m pytest -q
+        working-directory: backend
+      - run: python scripts/verify_postgres.py
+        env:
+          SENTINEL_TEST_POSTGRES_URL: postgresql+psycopg://sentinel_test:disposable-ci-password@localhost:5432/sentinel_test_ci
+      - run: npm ci && npm test -- --run && npm run build
+        working-directory: frontend
+      - run: npx playwright install --with-deps chromium && npm run test:e2e
+        working-directory: frontend
+        env:
+          E2E_PYTHON: python

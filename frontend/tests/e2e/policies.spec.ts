@@ -1,0 +1,31 @@
+import { expect, test } from '@playwright/test'
+
+test('admin drafts, reviews, publishes, and restores an enforced policy', async ({page, request}, testInfo) => {
+  const apiURL = String(testInfo.config.metadata.apiURL)
+  await page.goto('/')
+  await page.getByRole('button', {name:'Enter shared workspace',exact:true}).click()
+  await page.getByRole('button', {name:'Policies',exact:true}).click()
+  const credentials = await request.post(`${apiURL}/auth/login`, {data:{email:'admin@sentinelchain.local',password:'demo1234'}})
+  const admin = {Authorization:`Bearer ${(await credentials.json()).access_token}`}
+  const original = await (await request.get(`${apiURL}/security/policies`, {headers:admin})).json()
+  await page.getByRole('button', {name:'Create policy draft',exact:true}).click()
+  await page.getByRole('checkbox', {name:'forecast · manage',exact:true}).nth(1).uncheck()
+  await page.getByLabel('Draft reason', {exact:true}).fill('E2E synthetic restriction')
+  await page.getByRole('button', {name:'Save draft for review',exact:true}).click()
+  await expect(page.getByRole('region', {name:'Policy publication review'})).toBeVisible()
+  const analystLogin = await request.post(`${apiURL}/auth/login`, {data:{email:'analyst@sentinelchain.local',password:'demo1234'}})
+  const analyst = {Authorization:`Bearer ${(await analystLogin.json()).access_token}`}
+  const draftPermissions = await (await request.get(`${apiURL}/auth/permissions`, {headers:analyst})).json()
+  expect(draftPermissions.permissions).toContain('forecast.manage')
+  await page.getByLabel('Publication reason', {exact:true}).fill('E2E reviewed restriction')
+  await page.getByRole('button', {name:'Confirm and publish policy',exact:true}).click()
+  await expect(page.getByRole('status')).toContainText('Policy published')
+  const denied = await request.post(`${apiURL}/forecasts/SKU-001/train`, {headers:analyst})
+  expect(denied.status()).toBe(403)
+  await page.getByRole('row').filter({has:page.getByRole('cell',{name:String(original.active_revision_id),exact:true})}).getByRole('button',{name:'Review restoration',exact:true}).click()
+  await page.getByLabel('Publication reason', {exact:true}).fill('E2E restore baseline')
+  await page.getByRole('button', {name:'Confirm and restore policy',exact:true}).click()
+  await expect(page.getByRole('status')).toContainText('Policy published')
+  const restored = await (await request.get(`${apiURL}/auth/permissions`, {headers:analyst})).json()
+  expect(restored.permissions).toContain('forecast.manage')
+})

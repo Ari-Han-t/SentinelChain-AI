@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Generator
 
-from sqlalchemy import create_engine, inspect as sa_inspect, text
+from sqlalchemy import create_engine, inspect as sa_inspect, text, event
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
@@ -17,7 +17,16 @@ database_url = settings.database_url
 if database_url.startswith("postgresql://"):
     database_url = database_url.replace("postgresql://", "postgresql+psycopg://", 1)
 connect_args = {"check_same_thread": False} if database_url.startswith("sqlite") else {}
-engine = create_engine(database_url, connect_args=connect_args, pool_pre_ping=True)
+pool_options = {} if database_url.startswith('sqlite') else {
+    'pool_size':settings.database_pool_size,'max_overflow':settings.database_max_overflow,
+    'pool_timeout':settings.database_pool_timeout,'pool_recycle':1800}
+engine = create_engine(database_url, connect_args=connect_args, pool_pre_ping=True, **pool_options)
+if not database_url.startswith('sqlite'):
+    @event.listens_for(engine, 'connect')
+    def set_utc(dbapi_connection, _):
+        with dbapi_connection.cursor() as cursor:
+            cursor.execute("SET TIME ZONE 'UTC'")
+        dbapi_connection.commit()
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
 
 
@@ -68,6 +77,7 @@ def _upgrade_schema(connection: Connection) -> None:
         if name in node_columns:
             continue
         if dialect == "postgresql":
+            column_type = column_type.replace("DATETIME", "TIMESTAMP WITH TIME ZONE")
             connection.exec_driver_sql(f"ALTER TABLE supply_chain_nodes ADD COLUMN IF NOT EXISTS {name} {column_type}")
         else:
             connection.exec_driver_sql(f"ALTER TABLE supply_chain_nodes ADD COLUMN {name} {column_type}")
@@ -104,4 +114,9 @@ def _upgrade_schema(connection: Connection) -> None:
 
 
 def init_db() -> None:
-    ensure_schema(engine)
+    if settings.environment.lower() == 'production':
+        with engine.connect() as connection:
+            revision = connection.execute(text('SELECT version_num FROM alembic_version')).scalar()
+            if revision != '0010': raise RuntimeError('Run reviewed database migrations before startup')
+    else:
+        ensure_schema(engine)

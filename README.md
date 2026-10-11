@@ -25,6 +25,10 @@ The demo ships one seeded chain ("Sentinel Industrial Demo"), but the system is 
 - Every role sees every chain, but actions are role-scoped and enforced server-side from `GET /auth/permissions`: evidence submission (analyst, manager, admin), decisions (admin, manager), escalation (admin, manager), stage verification (auditor, admin), and chain/node/edge management (admin only). The UI only renders controls the signed-in role may use.
 - New evidence on a stage clears its verification stamp, and auditors re-verify it explicitly (`POST /nodes/{id}/verify`).
 
+## Phase 1 entity management
+
+Open **Operations → Entities** to manage suppliers, warehouses, inventory items/lots, draft purchase orders and shipments. Administrators can create, edit, deactivate and restore records with ownership, stage links, risk and server-enforced clearance. Other roles have clearance-filtered read access. Details include actual linked operational records and authorized audit history. See [Phase 1 API and development notes](docs/PHASE1.md) for migration 0005, API contracts, verification and limitations.
+
 ## Azure AI Foundry guidance
 
 Copy the Foundry variables from `.env.example` into `backend/.env`, then provide the Foundry `/openai/v1/responses` endpoint, API key, and deployment name. Calls use the OpenAI-compatible Responses API and happen only in the backend. When Foundry is disabled or unavailable, deterministic monitoring continues and the UI identifies the guidance provider.
@@ -159,7 +163,7 @@ The backend suite covers authentication, role boundaries, multi-chain and node a
 - HMAC proves possession of a shared key, not which individual supplier signed a file. Rotate compromised keys and migrate to asymmetric signatures for multi-party imports.
 - Isolation Forest can produce false positives. Quarantine requires an analyst review path before real deployment.
 - Forecast quality is measured only on synthetic data and is not evidence of real-world performance. Monitor drift and retrain only after validation.
-- This release simulates purchase orders and does not connect to an ERP or payment system.
+- Purchase-order execution remains simulated. Phase 3 provides normalized read-only partner adapters and reviewed imports; no real partner connection or payment integration has been verified.
 
 ## Repository map
 
@@ -174,3 +178,19 @@ frontend/tests/    component and Playwright tests
 ## Classroom documentation
 
 Start with [docs/README.md](docs/README.md) for a plain-language project overview, a 6-8 minute live demo script, the technical reference, and a copy-paste prompt for generating the class presentation.
+
+## Phase 2 policy administration
+
+Open **Policies** as an administrator to configure typed policy drafts, review and publish changes, inspect version history, restore prior configurations, and assign existing user roles. Published restrictions are enforced on direct backend requests, including entity clearance, sensitive stock/supplier/forecast operations and approvals. See [Phase 2 API, security boundaries and verification](docs/PHASE2.md) for migration 0006 and limitations.
+
+## Phase 3 external integrations
+
+Open **Integrations** as an administrator to configure ERP, inventory, supplier and logistics connections, check health, synchronize an encrypted review inbox, and explicitly import fresh live source versions through existing policy guards. Development mocks are labeled synthetic and blocked from operational import. See [Phase 3 contracts, setup and limits](docs/PHASE3.md).
+
+## Phases 4 and 5 — recommendation history and notifications
+
+**Recommendations** shows evidence-linked stock/stage explanations, captured risk assessments, decisions, implementation reports and uncertainty. **Notifications** adds personal read status, assigned incidents, configurable routing/deadlines and recorded escalation. Published backend authorization remains enforced; email is unconfigured. See [Phase 4 API and boundaries](docs/PHASE4.md) and [Phase 5 event sources and processing](docs/PHASE5.md). Apply migrations 0008 and 0009 before deployment.
+
+## Phases 6–10: security operations and deployment preparation
+
+Expanded isolated simulations, scoped audit exploration, consolidated Security UI and PostgreSQL deployment safeguards are documented in [PHASE6-10.md](docs/PHASE6-10.md) and [DEPLOYMENT.md](docs/DEPLOYMENT.md). Apply migration 0010 before use. Real PostgreSQL validation uses `scripts/verify_postgres.py` with an explicitly disposable `sentinel_test_*` database; PostgreSQL readiness is not claimed from SQLite tests. CI configuration includes this separate check. Production startup requires reviewed migrations and forbids synthetic seeding/simulations.

@@ -1,0 +1,17 @@
+import {expect,test} from '@playwright/test'
+test('administrator records an isolated security simulation and explores its audit event',async({page})=>{
+ await page.goto('/')
+ await page.getByRole('button',{name:'Enter shared workspace',exact:true}).click()
+ await page.getByRole('button',{name:'Security',exact:true}).click()
+ await page.getByRole('button',{name:'Attack simulations',exact:true}).click()
+ await page.getByLabel('Attack scenario').selectOption('privilege_escalation')
+ await page.getByLabel('Simulation reason').fill('Controlled browser security regression')
+ await page.getByRole('button',{name:'Review simulation',exact:true}).click()
+ await page.getByRole('button',{name:'Confirm simulation',exact:true}).click()
+ await expect(page.getByRole('region',{name:'Simulation result'})).toContainText('passed')
+ await expect(page.getByRole('region',{name:'Simulation result'})).toContainText('Unchanged')
+ await page.getByRole('button',{name:'Audit explorer',exact:true}).click()
+ await page.getByLabel('Action filter').fill('simulation.completed')
+ await page.getByRole('button',{name:/Review audit event/}).first().click()
+ await expect(page.getByRole('region',{name:'Audit event detail'})).toContainText('Correlation ID')
+})

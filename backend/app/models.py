@@ -442,3 +442,264 @@ class ActionProposal(Base):
     decided_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     decision_note: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class Warehouse(Base):
+    __tablename__ = "warehouses"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    code: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(160))
+    location: Mapped[str] = mapped_column(String(160), default="")
+
+
+class EntityGovernance(Base):
+    __tablename__ = "entity_governance"
+    __table_args__ = (UniqueConstraint("kind", "entity_id", name="uq_entity_governance"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    kind: Mapped[str] = mapped_column(String(30), index=True)
+    entity_id: Mapped[int] = mapped_column(Integer, index=True)
+    owner_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    stage_id: Mapped[int | None] = mapped_column(ForeignKey("supply_chain_nodes.id"), nullable=True)
+    warehouse_id: Mapped[int | None] = mapped_column(ForeignKey("warehouses.id"), nullable=True)
+    risk_level: Mapped[str] = mapped_column(String(20), default="low")
+    minimum_clearance: Mapped[int] = mapped_column(Integer, default=1)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class PolicyRevision(Base):
+    __tablename__ = "policy_revisions"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    configuration_json: Mapped[str] = mapped_column(Text)
+    digest: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(20), default="draft")
+    base_generation: Mapped[int] = mapped_column(Integer)
+    created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    reason: Mapped[str] = mapped_column(Text)
+    published_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class PolicyState(Base):
+    __tablename__ = "policy_state"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    active_revision_id: Mapped[int] = mapped_column(ForeignKey("policy_revisions.id"))
+    generation: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class IntegrationConnection(Base):
+    __tablename__ = "integration_connections"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(120), unique=True)
+    system: Mapped[str] = mapped_column(String(20))
+    mode: Mapped[str] = mapped_column(String(10))
+    profile: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    mock_scenario: Mapped[str] = mapped_column(String(20), default="healthy")
+    stale_after_seconds: Mapped[int] = mapped_column(Integer, default=3600)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    health: Mapped[str] = mapped_column(String(30), default="not_checked")
+    cursor: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    lease_owner: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    created_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class IntegrationRun(Base):
+    __tablename__ = "integration_runs"
+    __table_args__ = (UniqueConstraint("connection_id", "idempotency_key", name="uq_integration_run_key"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    connection_id: Mapped[int] = mapped_column(ForeignKey("integration_connections.id"), index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(80))
+    operation: Mapped[str] = mapped_column(String(10))
+    status: Mapped[str] = mapped_column(String(20), default="running")
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    accepted: Mapped[int] = mapped_column(Integer, default=0)
+    duplicates: Mapped[int] = mapped_column(Integer, default=0)
+    ignored: Mapped[int] = mapped_column(Integer, default=0)
+    error_code: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    error_detail: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    requested_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    reason: Mapped[str] = mapped_column(String(1000))
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class IntegrationRecord(Base):
+    __tablename__ = "integration_records"
+    __table_args__ = (UniqueConstraint("connection_id", "resource", "external_id", name="uq_integration_record_identity"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    connection_id: Mapped[int] = mapped_column(ForeignKey("integration_connections.id"), index=True)
+    resource: Mapped[str] = mapped_column(String(30))
+    external_id: Mapped[str] = mapped_column(String(120))
+    source_version: Mapped[int] = mapped_column(Integer)
+    digest: Mapped[str] = mapped_column(String(64))
+    encrypted_data: Mapped[str] = mapped_column(Text)
+    provenance: Mapped[str] = mapped_column(String(20))
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    run_id: Mapped[str] = mapped_column(ForeignKey("integration_runs.id"))
+    entity_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    applied_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class IntegrationEvent(Base):
+    __tablename__ = "integration_events"
+    __table_args__ = (UniqueConstraint("connection_id", "event_id", name="uq_integration_event_identity"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    connection_id: Mapped[int] = mapped_column(ForeignKey("integration_connections.id"), index=True)
+    event_id: Mapped[str] = mapped_column(String(120))
+    digest: Mapped[str] = mapped_column(String(64))
+    outcome: Mapped[str] = mapped_column(String(20))
+    run_id: Mapped[str] = mapped_column(ForeignKey("integration_runs.id"))
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class RecommendationSnapshot(Base):
+    __tablename__ = 'recommendation_snapshots'
+    __table_args__ = (UniqueConstraint('kind','source_id',name='uq_recommendation_snapshot_source'),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    kind: Mapped[str] = mapped_column(String(20))
+    source_id: Mapped[int] = mapped_column(Integer, index=True)
+    explanation_json: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class RecommendationProgress(Base):
+    __tablename__ = 'recommendation_progress'
+    __table_args__ = (UniqueConstraint('kind','source_id',name='uq_recommendation_progress_source'),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    kind: Mapped[str] = mapped_column(String(20))
+    source_id: Mapped[int] = mapped_column(Integer)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    implementation_status: Mapped[str] = mapped_column(String(30), default='not_started')
+    outcome: Mapped[str] = mapped_column(Text, default='')
+    feedback: Mapped[str] = mapped_column(Text, default='')
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class RecommendationHistoryEvent(Base):
+    __tablename__ = 'recommendation_history_events'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    kind: Mapped[str] = mapped_column(String(20), index=True)
+    source_id: Mapped[int] = mapped_column(Integer, index=True)
+    event_type: Mapped[str] = mapped_column(String(60))
+    actor_id: Mapped[int | None] = mapped_column(ForeignKey('users.id'), nullable=True)
+    audit_id: Mapped[int] = mapped_column(ForeignKey('audit_events.id'), unique=True)
+    detail_json: Mapped[str] = mapped_column(Text, default='{}')
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class NotificationRule(Base):
+    __tablename__ = 'notification_rules'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    category: Mapped[str] = mapped_column(String(60), unique=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    minimum_severity: Mapped[str] = mapped_column(String(20), default='medium')
+    assigned_role: Mapped[str] = mapped_column(String(40), default='administrator')
+    assigned_user_id: Mapped[int | None] = mapped_column(ForeignKey('users.id'), nullable=True)
+    escalation_role: Mapped[str] = mapped_column(String(40), default='administrator')
+    escalation_minutes: Mapped[int] = mapped_column(Integer, default=60)
+    remediation_minutes: Mapped[int] = mapped_column(Integer, default=240)
+    quantity_threshold: Mapped[float] = mapped_column(Float, default=10000)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class Incident(Base):
+    __tablename__ = 'incidents'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    dedup_key: Mapped[str] = mapped_column(String(180), unique=True)
+    category: Mapped[str] = mapped_column(String(60), index=True)
+    severity: Mapped[str] = mapped_column(String(20), index=True)
+    title: Mapped[str] = mapped_column(String(200))
+    detail: Mapped[str] = mapped_column(Text)
+    entity_kind: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    entity_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    status: Mapped[str] = mapped_column(String(30), default='open', index=True)
+    assigned_role: Mapped[str] = mapped_column(String(40))
+    assigned_user_id: Mapped[int | None] = mapped_column(ForeignKey('users.id'), nullable=True)
+    escalation_role: Mapped[str] = mapped_column(String(40))
+    escalation_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    escalation_level: Mapped[int] = mapped_column(Integer, default=0)
+    occurrence_count: Mapped[int] = mapped_column(Integer, default=1)
+    acknowledged_by: Mapped[int | None] = mapped_column(ForeignKey('users.id'), nullable=True)
+    acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolved_by: Mapped[int | None] = mapped_column(ForeignKey('users.id'), nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolution_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class IncidentOccurrence(Base):
+    __tablename__ = 'incident_occurrences'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    incident_id: Mapped[int] = mapped_column(ForeignKey('incidents.id'), index=True)
+    source_key: Mapped[str] = mapped_column(String(180), unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class IncidentHistory(Base):
+    __tablename__ = 'incident_history'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    incident_id: Mapped[int] = mapped_column(ForeignKey('incidents.id'), index=True)
+    event_type: Mapped[str] = mapped_column(String(60))
+    actor_id: Mapped[int | None] = mapped_column(ForeignKey('users.id'), nullable=True)
+    detail_json: Mapped[str] = mapped_column(Text, default='{}')
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class NotificationDelivery(Base):
+    __tablename__ = 'notification_deliveries'
+    __table_args__ = (UniqueConstraint('incident_id','user_id','level','channel',name='uq_notification_delivery'),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    incident_id: Mapped[int] = mapped_column(ForeignKey('incidents.id'), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    level: Mapped[int] = mapped_column(Integer, default=0)
+    channel: Mapped[str] = mapped_column(String(20), default='in_app')
+    status: Mapped[str] = mapped_column(String(20), default='pending')
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class StageRiskAssessment(Base):
+    __tablename__='stage_risk_assessments'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    node_id: Mapped[int] = mapped_column(ForeignKey('supply_chain_nodes.id'), index=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey('guidance_runs.id'), unique=True)
+    assessment_json: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class AuditWriteLock(Base):
+    __tablename__='audit_write_lock'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    value: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class SecuritySimulation(Base):
+    __tablename__ = 'security_simulations'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    scenario: Mapped[str] = mapped_column(String(80), index=True)
+    actor_id: Mapped[int] = mapped_column(ForeignKey('users.id'))
+    policy_revision_id: Mapped[int] = mapped_column(Integer)
+    report_json: Mapped[str] = mapped_column(Text)
+    audit_id: Mapped[int | None] = mapped_column(ForeignKey('audit_events.id'))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+def utc_naive(value):
+    """Normalize SQLite naive and PostgreSQL aware timestamps for Python comparisons."""
+    return value.astimezone(timezone.utc).replace(tzinfo=None) if value.tzinfo else value

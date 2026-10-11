@@ -16,3 +16,7 @@ playwright-report/
 test-results/
 .vite/
 .DS_Store
+
+.env.*
+!.env.example
+!.env.production.example
