@@ -152,12 +152,23 @@ app.include_router(notification_router)
 request_windows: OrderedDict[str, deque[float]] = OrderedDict()
 
 
+def _client_key(request: Request) -> str:
+    """Rate-limit identity. Behind N trusted proxies, use the Nth address from the right of
+    X-Forwarded-For (the one our own proxy appended), which a client cannot spoof."""
+    peer = request.client.host if request.client else "unknown"
+    hops = settings.trusted_proxy_hops
+    if hops <= 0:
+        return peer
+    chain = [part.strip() for part in request.headers.get("x-forwarded-for", "").split(",") if part.strip()]
+    return chain[-hops] if len(chain) >= hops else peer
+
+
 @app.middleware("http")
 async def rate_limit(request: Request, call_next):
     if request.url.path == "/health":
         return await call_next(request)
     now = time.monotonic()
-    key = request.client.host if request.client else "unknown"
+    key = _client_key(request)
     if key not in request_windows:
         if len(request_windows) >= 10000: request_windows.popitem(last=False)
         request_windows[key] = deque()

@@ -120,6 +120,32 @@ def _response_output_text(response: dict[str, Any]) -> str:
     return "\n".join(fragments)
 
 
+_bedrock_client = None
+
+
+def _bedrock_converse(system: str, user: str) -> str | None:
+    """Call a Bedrock model through the Converse API; returns None unless generation completed."""
+    global _bedrock_client
+    if _bedrock_client is None:
+        import boto3
+        from botocore.config import Config
+
+        _bedrock_client = boto3.client(
+            "bedrock-runtime",
+            region_name=settings.aws_region,
+            config=Config(read_timeout=settings.ai_timeout_seconds, retries={"max_attempts": 2, "mode": "standard"}),
+        )
+    response = _bedrock_client.converse(
+        modelId=settings.bedrock_model_id,
+        system=[{"text": system}],
+        messages=[{"role": "user", "content": [{"text": user}]}],
+        inferenceConfig={"maxTokens": settings.ai_max_tokens, "temperature": 0},
+    )
+    if response.get("stopReason") != "end_turn":
+        return None
+    return "".join(block.get("text", "") for block in response["output"]["message"]["content"])
+
+
 def remote_guidance(provider: str, node: dict[str, Any], evidence: list[dict[str, Any]], organization: dict[str, Any]) -> GuidancePayload | None:
     providers = {
         "gemini": ("https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", settings.gemini_api_key, settings.gemini_model),
@@ -132,6 +158,8 @@ def remote_guidance(provider: str, node: dict[str, Any], evidence: list[dict[str
     elif provider == "azure-ai-foundry":
         if not settings.azure_ai_foundry_endpoint or not settings.azure_ai_foundry_api_key:
             return None
+    elif provider == "bedrock":
+        pass
     else:
         return None
     system = (
@@ -146,7 +174,11 @@ def remote_guidance(provider: str, node: dict[str, Any], evidence: list[dict[str
         "required_shape": GuidancePayload.model_json_schema(),
     }
     try:
-        if provider == "azure-ai-foundry":
+        if provider == "bedrock":
+            content = _bedrock_converse(system, json.dumps(payload, default=str))
+            if content is None:
+                return None
+        elif provider == "azure-ai-foundry":
             response = httpx.post(
                 _foundry_responses_url(settings.azure_ai_foundry_endpoint),
                 headers={

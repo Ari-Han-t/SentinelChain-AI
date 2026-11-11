@@ -29,6 +29,14 @@ The demo ships one seeded chain ("Sentinel Industrial Demo"), but the system is 
 
 Open **Operations → Entities** to manage suppliers, warehouses, inventory items/lots, draft purchase orders and shipments. Administrators can create, edit, deactivate and restore records with ownership, stage links, risk and server-enforced clearance. Other roles have clearance-filtered read access. Details include actual linked operational records and authorized audit history. See [Phase 1 API and development notes](docs/PHASE1.md) for migration 0005, API contracts, verification and limitations.
 
+## Amazon Bedrock guidance and AWS showcase mode
+
+- `AI_PROVIDER=bedrock` sends guidance requests to a Bedrock model through the Converse API (default `BEDROCK_MODEL_ID=us.anthropic.claude-haiku-4-5-20251001-v1:0`, region from `AWS_REGION`). It authenticates through the standard AWS credential chain, so on EC2/ECS the attached IAM role is used and no API key is configured. Output goes through the same guards as the other providers: schema validation, cited evidence IDs must exist, and anything other than a completed generation (`stopReason == end_turn`) falls back to deterministic guidance.
+- `ENVIRONMENT=showcase` is for a public demo. Seeded synthetic data and demo logins are allowed, but startup still rejects short, default or duplicated secrets.
+- `TRUSTED_PROXY_HOPS=N` makes the per-client rate limiter key on the address that your own proxy appended to `X-Forwarded-For`. Without it, every visitor behind a reverse proxy shared one bucket; a client can't spoof its slot by sending its own header.
+- `frontend/nginx.aws.conf` (selected with `--build-arg NGINX_CONF=nginx.aws.conf --build-arg VITE_API_URL=/api`) serves the SPA and proxies `/api/` to the API on one origin, with a tightened `connect-src 'self'` CSP.
+- Covered by `backend/tests/test_aws_showcase.py`.
+
 ## Azure AI Foundry guidance
 
 Copy the Foundry variables from `.env.example` into `backend/.env`, then provide the Foundry `/openai/v1/responses` endpoint, API key, and deployment name. Calls use the OpenAI-compatible Responses API and happen only in the backend. When Foundry is disabled or unavailable, deterministic monitoring continues and the UI identifies the guidance provider.

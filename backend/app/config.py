@@ -22,7 +22,14 @@ class Settings(BaseSettings):
     rate_limit_per_minute: int = 180
     bootstrap_admin_email: str | None = None
     bootstrap_admin_password: str | None = Field(default=None, repr=False)
-    ai_provider: Literal["deterministic", "azure-ai-foundry", "gemini", "groq"] | None = None
+    ai_provider: Literal["deterministic", "azure-ai-foundry", "gemini", "groq", "bedrock"] | None = None
+    # Amazon Bedrock guidance: authenticates through the standard AWS credential chain
+    # (an EC2/ECS IAM role in deployment), so no model API key is stored anywhere.
+    aws_region: str | None = None
+    bedrock_model_id: str = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+    # Number of trusted reverse proxies in front of the API (e.g. nginx = 1). When > 0 the
+    # per-client rate limiter keys on the matching X-Forwarded-For hop instead of the proxy IP.
+    trusted_proxy_hops: int = Field(default=0, ge=0, le=3)
     gemini_api_key: str | None = Field(default=None, repr=False)
     gemini_model: str = "gemini-2.5-flash"
     groq_api_key: str | None = Field(default=None, repr=False)
@@ -51,6 +58,14 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def reject_unsafe_production_secrets(self) -> "Settings":
+        if self.environment.lower() == "showcase":
+            # Public demo: synthetic data and demo accounts are intentional, but the
+            # cryptographic secrets must still be strong, unique and never the defaults.
+            values = (self.jwt_secret, self.import_hmac_secret, self.field_encryption_key)
+            if any(len(value) < 32 or value.startswith("development") for value in values):
+                raise ValueError("Showcase secrets must each be at least 32 characters")
+            if len(set(values)) != len(values):
+                raise ValueError("Showcase secrets must be distinct")
         if self.environment.lower() == "production":
             values = (self.jwt_secret, self.import_hmac_secret, self.field_encryption_key)
             if any(len(value) < 32 or value.startswith("development") for value in values):
