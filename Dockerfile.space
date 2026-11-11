@@ -1,0 +1,29 @@
+# Single-container image for Hugging Face Spaces (or any single-port host).
+# Build from the repo root:  docker build -f Dockerfile.space -t sentinelchain-space .
+FROM node:22-alpine AS web
+WORKDIR /web
+COPY frontend/package*.json ./
+RUN npm ci
+COPY frontend/ ./
+ENV VITE_API_URL=/api
+RUN npm run build
+
+FROM python:3.13-slim
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PORT=7860 \
+    ENVIRONMENT=showcase DEMO_MODE=true SEED_DEMO_DATA=true \
+    DATABASE_URL=sqlite:////app/data/sentinelchain.db \
+    AI_PROVIDER=groq TRUSTED_PROXY_HOPS=1 SPA_DIR=/app/static
+WORKDIR /app
+COPY backend/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY backend/app ./app
+COPY backend/alembic.ini ./
+COPY backend/alembic ./alembic
+COPY --from=web /web/dist ./static
+COPY space-entrypoint.sh /usr/local/bin/space-entrypoint.sh
+# Hugging Face runs containers as uid 1000; the SQLite demo DB lives in a writable dir.
+RUN chmod +x /usr/local/bin/space-entrypoint.sh \
+ && useradd -m -u 1000 user && mkdir -p /app/data && chown -R user /app/data
+USER user
+EXPOSE 7860
+ENTRYPOINT ["/usr/local/bin/space-entrypoint.sh"]

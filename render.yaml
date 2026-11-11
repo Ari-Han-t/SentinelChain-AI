@@ -1,35 +1,25 @@
-databases:
-  - name: sentinelchain-db
-    databaseName: sentinelchain
-    user: sentinelchain
-
+# Free-tier public demo (single container: React SPA + FastAPI + SQLite, synthetic data
+# re-seeded on every boot). The full production blueprint with PostgreSQL is in
+# render.production.yaml.
 services:
   - type: web
-    name: sentinelchain-api
+    name: sentinelchain-ai
     runtime: docker
-    dockerfilePath: ./backend/Dockerfile
-    dockerContext: ./backend
-    healthCheckPath: /health
+    plan: free
+    dockerfilePath: ./Dockerfile.space
+    dockerContext: .
+    healthCheckPath: /api/health
+    autoDeploy: true
     envVars:
       - key: ENVIRONMENT
-        value: production
-      - key: DATABASE_URL
-        fromDatabase:
-          name: sentinelchain-db
-          property: connectionString
+        value: showcase
+      - key: TRUSTED_PROXY_HOPS
+        value: "1"
       - key: JWT_SECRET
         generateValue: true
       - key: IMPORT_HMAC_SECRET
         generateValue: true
       - key: FIELD_ENCRYPTION_KEY
         generateValue: true
-      - key: DEMO_MODE
-        value: "false"
-      - key: SEED_DEMO_DATA
-        value: "false"
-      - key: BOOTSTRAP_ADMIN_EMAIL
+      - key: GROQ_API_KEY      # optional: enables LLM guidance; deterministic without it
         sync: false
-      - key: BOOTSTRAP_ADMIN_PASSWORD
-        sync: false
-      - key: CORS_ORIGINS
-        value: https://sentinelchain-ai.vercel.app
